@@ -1,0 +1,8 @@
+{
+  "name": "pi-claude-auth",
+  "type": "module",
+  "private": true,
+  "pi": {
+    "extensions": ["./index.ts"]
+  }
+}
