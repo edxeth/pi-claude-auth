@@ -2,6 +2,13 @@
   "name": "pi-claude-auth",
   "type": "module",
   "private": true,
+  "scripts": {
+    "test": "bun test"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.80.0",
+    "@earendil-works/pi-tui": "^0.78.0"
+  },
   "pi": {
     "extensions": ["./src/index.ts"]
   }

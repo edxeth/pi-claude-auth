@@ -12,7 +12,4 @@ export function getPiAgentDir(): string {
     return process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent")
 }
 
-/** Absolute path to pi's auth.json (where credentials are persisted). */
-export function getAuthJsonPath(): string {
-    return join(getPiAgentDir(), "auth.json")
-}
+

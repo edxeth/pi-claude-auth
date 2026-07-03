@@ -4,7 +4,7 @@
 
 When Pi calls Anthropic with an OAuth token, Anthropic treats it as third-party harness traffic. It routes those requests through a separate "extra usage" bucket and bills them per token, outside your plan window. This extension sends the Claude Code billing header and identity, so Anthropic sees the request as Claude Code traffic and draws it from your plan quota.
 
-It reads credentials from your Pi auth store, refreshes them through Anthropic's OAuth endpoint, and keeps the Claude Code version in sync with the latest release on npm.
+Pi's built-in `anthropic` provider owns the OAuth lifecycle (browser login, token refresh, and credential storage in `~/.pi/agent/auth.json`). This extension adds only the pieces pi's provider does not send, so requests bill against your plan: the Claude Code user-agent header and the billing header, plus a retry on Anthropic classifier refusals. It deliberately does **not** register a custom OAuth lifecycle — doing so would overwrite pi's built-in provider and break `/login`. (Pi already prefers the stored OAuth token over any `ANTHROPIC_API_KEY` env var, so the extension never needs to touch credentials.)
 
 ## 🌐 **Join the Community**
 
@@ -23,13 +23,17 @@ pi install git:github.com/edxeth/pi-claude-auth
 
 ## How it works
 
-Three things have to line up before Anthropic bills a request against your plan: the right OAuth token, the Claude Code identity in the system prompt, and the billing header that carries the version. Pi's built-in Anthropic provider already handles the token plumbing and the identity. This extension adds the billing header and keeps the version current.
+Three things have to line up before Anthropic bills a request against your plan: the right OAuth token, the Claude Code identity in the system prompt, and the billing header that carries the version. Pi's built-in Anthropic provider handles the token plumbing (login, refresh, storage) and the identity. This extension adds the billing header and keeps the version current.
 
 ### Credentials
 
-The extension reads the `anthropic` OAuth entry from `~/.pi/agent/auth.json`. On every session start it pushes that credential into Pi's live auth storage, so the token takes priority over any `ANTHROPIC_API_KEY` in your environment.
+Run `/login anthropic`. Pi's built-in provider performs the browser OAuth flow and writes the `anthropic` entry to `~/.pi/agent/auth.json`:
 
-When the access token nears expiry, the extension refreshes it through Anthropic's OAuth token endpoint and writes the rotated token back to `auth.json`. Writes are atomic: a temp file, then a rename, with `0600` permissions. A crash mid-write cannot truncate your only credential store.
+```json
+{ "anthropic": { "type": "oauth", "access": "…", "refresh": "…", "expires": 1750… } }
+```
+
+That file is the single source of truth; the extension never reads or writes it. Pi loads the OAuth entry at startup, and its `getApiKey` already prefers that token over any `ANTHROPIC_API_KEY` in your environment, so no credential handling is needed here. Token refresh is handled by pi's built-in provider (which mints and refreshes at Anthropic's `platform.claude.com/v1/oauth/token` endpoint); the extension does not refresh tokens itself.
 
 ### The billing header
 
@@ -83,7 +87,7 @@ The extension recovers only after Pi finishes the refusal. If the stream hangs b
 
 ### `/login anthropic`
 
-The extension registers the `anthropic` provider with its OAuth lifecycle, so `/login anthropic` works the usual Pi way. The credential you get back is written to `auth.json` and reused on the next start.
+`/login anthropic` works exactly the usual Pi way — the extension does not register a custom OAuth lifecycle, so pi's built-in `anthropic` provider stays in charge of the browser login, refresh, and storage. Log in once and pi persists the credential to `~/.pi/agent/auth.json`, which this extension then reads on every start.
 
 ## Environment variables
 
