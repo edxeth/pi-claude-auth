@@ -238,10 +238,17 @@ const extension = async (pi: ExtensionAPI): Promise<void> => {
     }
 
     // Keep auth.json synced with current credentials (no refresh triggered).
+    // Only write when the access token actually changed: avoids pointless churn
+    // that widens the atomic-write corruption window and avoids clobbering a
+    // fresher token another pi process rotated.
+    let lastSyncedAccess: string | null = null
     const syncTimer = setInterval(() => {
         try {
             const creds = getCredentialsForSync()
-            if (creds) syncAuthJson(creds)
+            if (creds && creds.accessToken !== lastSyncedAccess) {
+                syncAuthJson(creds)
+                lastSyncedAccess = creds.accessToken
+            }
         } catch {
             // Non-fatal
         }

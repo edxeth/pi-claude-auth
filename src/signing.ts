@@ -1,10 +1,10 @@
 import { createHash } from "node:crypto"
 
-// Same salt CortexKit exposes as CCH_SALT. This local extension keeps the
-// original pi-claude-auth cch algorithm because it runs in pi's
-// before_provider_request hook and does not own the final JSON serialization.
-// A CortexKit-style full-body xxHash signature would be more fragile here
-// unless this extension also replaced the whole Anthropic stream transport.
+// Billing salt used by Claude Code's cch scheme. This local extension keeps a
+// hook-safe cch algorithm because it runs in pi's before_provider_request hook
+// and does not own the final JSON serialization. A full-body xxHash signature
+// would be more fragile here unless this extension also replaced the whole
+// Anthropic stream transport.
 const BILLING_SALT = "59cf53e54c78"
 
 // Fallback Claude Code CLI version used when startup version discovery fails.
@@ -27,9 +27,11 @@ export function setDiscoveredCliVersion(version: string): void {
 // Overridable via CLAUDE_CODE_ENTRYPOINT.
 export const CC_ENTRYPOINT = "cli"
 
-/** Resolve the Claude Code CLI version (env override wins). */
+/** Resolve the Claude Code CLI version (validated env override wins). */
+const SEMVER_RE = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/
 export function getCliVersion(): string {
-    return process.env.ANTHROPIC_CLI_VERSION ?? activeCliVersion
+    const envVersion = process.env.ANTHROPIC_CLI_VERSION
+    return envVersion && SEMVER_RE.test(envVersion) ? envVersion : activeCliVersion
 }
 
 /** Resolve the billing entrypoint (env override wins). */
@@ -76,10 +78,16 @@ export function extractFirstUserMessageText(messages: Message[]): string {
 /**
  * Compute cch using the original pi-claude-auth hook-safe scheme.
  *
- * CortexKit signs the final serialized request body with xxHash because its
- * custom stream transport owns serialization. This extension only mutates pi's
- * provider payload before the built-in Anthropic transport serializes it, so we
- * keep the already-validated hook-safe cch behavior.
+ * WARNING — load-bearing assumption: current Claude Code (2.1.198) does NOT
+ * compute cch this way. It writes `cch=00000;` and body-signs the final
+ * serialized request with xxHash. This extension cannot do that because it
+ * mutates pi's provider payload before the built-in Anthropic transport
+ * serializes it, so it does not own the final body bytes. This simplified cch
+ * works ONLY because Anthropic does not currently enforce cch validation
+ * (proven by the live AUTH_OK smoke test). If Anthropic ever starts enforcing
+ * cch, every request from this fork will fail with no in-product recovery — at
+ * that point the fix is to replace the Anthropic stream transport so this code
+ * owns serialization and can body-sign.
  */
 export function computeCch(messageText: string): string {
     return createHash("sha256").update(messageText).digest("hex").slice(0, 5)

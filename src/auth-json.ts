@@ -59,7 +59,12 @@ function readPiAuthCredentials(): ClaudeCredentials | null {
     }
 }
 
-function writePiAuthCredentials(creds: ClaudeCredentials): boolean {
+/**
+ * Single atomic writer for ~/.pi/agent/auth.json. Other modules must persist
+ * the anthropic OAuth entry through this function (temp file + rename + 0600)
+ * so a crash mid-write can never truncate the sole credential store.
+ */
+export function writePiAuthCredentials(creds: ClaudeCredentials): boolean {
     try {
         const authPath = getAuthJsonPath()
         let parsed: Record<string, unknown> = {}

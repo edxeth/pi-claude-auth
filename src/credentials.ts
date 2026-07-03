@@ -1,6 +1,5 @@
 import { execFileSync } from "node:child_process"
 import {
-    chmodSync,
     existsSync,
     mkdirSync,
     readFileSync,
@@ -11,6 +10,7 @@ import {
     readAllClaudeAccounts,
     refreshAccount,
     writeBackCredentials,
+    writePiAuthCredentials,
     type ClaudeAccount,
     type ClaudeCredentials,
 } from "./auth-json.ts"
@@ -87,44 +87,11 @@ export function saveAccountSource(source: string): void {
     }
 }
 
-function syncToPath(authPath: string, creds: ClaudeCredentials): void {
-    let auth: Record<string, unknown> = {}
-    if (existsSync(authPath)) {
-        const raw = readFileSync(authPath, "utf-8").trim()
-        if (raw) {
-            try {
-                auth = JSON.parse(raw)
-            } catch {
-                // Malformed file, start fresh
-            }
-        }
-    }
-    // pi persists OAuth credentials as `{ type: "oauth", access, refresh,
-    // expires }` keyed by provider id. Seeding the `anthropic` entry lets pi
-    // use the Claude Code credentials with no separate /login.
-    auth.anthropic = {
-        type: "oauth",
-        access: creds.accessToken,
-        refresh: creds.refreshToken,
-        expires: creds.expiresAt,
-    }
-    const dir = dirname(authPath)
-    if (!existsSync(dir)) {
-        mkdirSync(dir, { recursive: true, mode: 0o700 })
-    }
-    writeFileSync(authPath, JSON.stringify(auth, null, 2), {
-        encoding: "utf-8",
-        mode: 0o600,
-    })
-    if (process.platform !== "win32") {
-        chmodSync(authPath, 0o600)
-    }
-}
-
 export function syncAuthJson(creds: ClaudeCredentials): void {
     const authPath = getAuthJsonPath()
     try {
-        syncToPath(authPath, creds)
+        const ok = writePiAuthCredentials(creds)
+        if (!ok) throw new Error("atomic auth.json write returned false")
         log("sync_auth_json", { path: authPath, success: true })
     } catch (err) {
         log("sync_auth_json", {
