@@ -3,6 +3,6 @@
   "type": "module",
   "private": true,
   "pi": {
-    "extensions": ["./index.ts"]
+    "extensions": ["./src/index.ts"]
   }
 }

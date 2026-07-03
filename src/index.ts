@@ -25,6 +25,7 @@ import {
 import { initLogger, log } from "./logger.ts"
 import { buildUserAgent, FALLBACK_CC_VERSION } from "./signing.ts"
 import { injectBillingHeader } from "./transforms.ts"
+import { registerRetryAfterRefusal } from "./retry-refusal.ts"
 import { Container, matchesKey, Spacer, Text } from "@earendil-works/pi-tui"
 
 export {
@@ -323,6 +324,8 @@ const extension = async (pi: ExtensionAPI): Promise<void> => {
         oauth,
         headers: { "user-agent": buildUserAgent() },
     })
+
+    registerRetryAfterRefusal(pi)
 
     // Inject the live credential into pi's AuthStorage on every session start.
     // This is what makes pi actually use the Claude Code OAuth token (and
