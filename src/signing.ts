@@ -1,11 +1,11 @@
-import { createHash } from "node:crypto"
+import { createHash } from "node:crypto";
 
 // Billing salt used by Claude Code's cch scheme. This local extension keeps a
 // hook-safe cch algorithm because it runs in pi's before_provider_request hook
 // and does not own the final JSON serialization. A full-body xxHash signature
 // would be more fragile here unless this extension also replaced the whole
 // Anthropic stream transport.
-const BILLING_SALT = "59cf53e54c78"
+const BILLING_SALT = "59cf53e54c78";
 
 // Fallback Claude Code CLI version used when startup version discovery fails.
 // The active version is normally resolved from @anthropic-ai/claude-code's npm
@@ -14,29 +14,31 @@ const BILLING_SALT = "59cf53e54c78"
 // validation to route the request to the Claude Pro/Max plan instead of
 // pay-as-you-go / extra usage.
 // Overridable via ANTHROPIC_CLI_VERSION.
-export const FALLBACK_CC_VERSION = "2.1.198"
+export const FALLBACK_CC_VERSION = "2.1.198";
 
-let activeCliVersion = FALLBACK_CC_VERSION
+let activeCliVersion = FALLBACK_CC_VERSION;
 
 export function setDiscoveredCliVersion(version: string): void {
-    activeCliVersion = version
+	activeCliVersion = version;
 }
 
 // Billing entrypoint, mirrored in the user-agent's `(external, <entrypoint>)`
 // suffix. `cli` is the Claude Code CLI route we emulate for pi.
 // Overridable via CLAUDE_CODE_ENTRYPOINT.
-export const CC_ENTRYPOINT = "cli"
+const CC_ENTRYPOINT = "cli";
 
 /** Resolve the Claude Code CLI version (validated env override wins). */
-const SEMVER_RE = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/
+const SEMVER_RE = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/;
 export function getCliVersion(): string {
-    const envVersion = process.env.ANTHROPIC_CLI_VERSION
-    return envVersion && SEMVER_RE.test(envVersion) ? envVersion : activeCliVersion
+	const envVersion = process.env.ANTHROPIC_CLI_VERSION;
+	return envVersion && SEMVER_RE.test(envVersion)
+		? envVersion
+		: activeCliVersion;
 }
 
 /** Resolve the billing entrypoint (env override wins). */
 export function getEntrypoint(): string {
-    return process.env.CLAUDE_CODE_ENTRYPOINT ?? CC_ENTRYPOINT
+	return process.env.CLAUDE_CODE_ENTRYPOINT ?? CC_ENTRYPOINT;
 }
 
 /**
@@ -45,15 +47,15 @@ export function getEntrypoint(): string {
  * `claude-cli/<version> (external, <entrypoint>)` form, so we override it.
  */
 export function buildUserAgent(): string {
-    return (
-        process.env.ANTHROPIC_USER_AGENT ??
-        `claude-cli/${getCliVersion()} (external, ${getEntrypoint()})`
-    )
+	return (
+		process.env.ANTHROPIC_USER_AGENT ??
+		`claude-cli/${getCliVersion()} (external, ${getEntrypoint()})`
+	);
 }
 
 interface Message {
-    role?: string
-    content?: string | Array<{ type?: string; text?: string }>
+	role?: string;
+	content?: string | Array<{ type?: string; text?: string }>;
 }
 
 /**
@@ -61,18 +63,18 @@ interface Message {
  * Mirrors Claude Code's billing-header input selection: find the first message
  * with role "user", then return the text of its first text content block.
  */
-export function extractFirstUserMessageText(messages: Message[]): string {
-    const userMsg = messages.find((m) => m.role === "user")
-    if (!userMsg) return ""
-    const content = userMsg.content
-    if (typeof content === "string") return content
-    if (Array.isArray(content)) {
-        const textBlock = content.find((b) => b.type === "text")
-        if (textBlock && textBlock.type === "text" && textBlock.text) {
-            return textBlock.text
-        }
-    }
-    return ""
+function extractFirstUserMessageText(messages: Message[]): string {
+	const userMsg = messages.find((m) => m.role === "user");
+	if (!userMsg) return "";
+	const content = userMsg.content;
+	if (typeof content === "string") return content;
+	if (Array.isArray(content)) {
+		const textBlock = content.find((b) => b.type === "text");
+		if (textBlock && textBlock.type === "text" && textBlock.text) {
+			return textBlock.text;
+		}
+	}
+	return "";
 }
 
 /**
@@ -89,8 +91,8 @@ export function extractFirstUserMessageText(messages: Message[]): string {
  * that point the fix is to replace the Anthropic stream transport so this code
  * owns serialization and can body-sign.
  */
-export function computeCch(messageText: string): string {
-    return createHash("sha256").update(messageText).digest("hex").slice(0, 5)
+function computeCch(messageText: string): string {
+	return createHash("sha256").update(messageText).digest("hex").slice(0, 5);
 }
 
 /**
@@ -103,15 +105,12 @@ export function computeCch(messageText: string): string {
  * Claude Code semver, and different semvers produce different suffixes for the
  * same prompt.
  */
-export function computeVersionSuffix(
-    messageText: string,
-    version: string,
-): string {
-    const sampled = [4, 7, 20]
-        .map((i) => (i < messageText.length ? messageText[i] : "0"))
-        .join("")
-    const input = `${BILLING_SALT}${sampled}${version}`
-    return createHash("sha256").update(input).digest("hex").slice(0, 3)
+function computeVersionSuffix(messageText: string, version: string): string {
+	const sampled = [4, 7, 20]
+		.map((i) => (i < messageText.length ? messageText[i] : "0"))
+		.join("");
+	const input = `${BILLING_SALT}${sampled}${version}`;
+	return createHash("sha256").update(input).digest("hex").slice(0, 3);
 }
 
 /**
@@ -119,17 +118,17 @@ export function computeVersionSuffix(
  * Format: x-anthropic-billing-header: cc_version=V.S; cc_entrypoint=E; cch=H;
  */
 export function buildBillingHeaderValue(
-    messages: Message[],
-    version: string,
-    entrypoint: string,
+	messages: Message[],
+	version: string,
+	entrypoint: string,
 ): string {
-    const text = extractFirstUserMessageText(messages)
-    const suffix = computeVersionSuffix(text, version)
-    const cch = computeCch(text)
-    return (
-        `x-anthropic-billing-header: ` +
-        `cc_version=${version}.${suffix}; ` +
-        `cc_entrypoint=${entrypoint}; ` +
-        `cch=${cch};`
-    )
+	const text = extractFirstUserMessageText(messages);
+	const suffix = computeVersionSuffix(text, version);
+	const cch = computeCch(text);
+	return (
+		`x-anthropic-billing-header: ` +
+		`cc_version=${version}.${suffix}; ` +
+		`cc_entrypoint=${entrypoint}; ` +
+		`cch=${cch};`
+	);
 }

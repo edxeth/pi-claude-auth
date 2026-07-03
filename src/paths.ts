@@ -1,5 +1,5 @@
-import { homedir } from "node:os"
-import { join } from "node:path"
+import { homedir } from "node:os";
+import { join } from "node:path";
 
 /**
  * Resolve pi's agent config directory.
@@ -9,7 +9,5 @@ import { join } from "node:path"
  * under this directory so the extension stays consistent with pi's layout.
  */
 export function getPiAgentDir(): string {
-    return process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent")
+	return process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
 }
-
-
