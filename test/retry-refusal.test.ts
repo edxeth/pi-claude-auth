@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import {
 	createRetryAfterRefusalState,
 	registerRetryAfterRefusal,
@@ -6,6 +6,18 @@ import {
 } from "../src/retry-refusal.ts";
 
 type Handler = (...args: unknown[]) => unknown;
+
+// Shield tests from an inherited PI_CLAUDE_AUTH_NO_OPUS_RETRY in the shell.
+let savedNoOpusRetry: string | undefined;
+beforeEach(() => {
+	savedNoOpusRetry = process.env.PI_CLAUDE_AUTH_NO_OPUS_RETRY;
+	delete process.env.PI_CLAUDE_AUTH_NO_OPUS_RETRY;
+});
+afterEach(() => {
+	if (savedNoOpusRetry === undefined)
+		delete process.env.PI_CLAUDE_AUTH_NO_OPUS_RETRY;
+	else process.env.PI_CLAUDE_AUTH_NO_OPUS_RETRY = savedNoOpusRetry;
+});
 
 describe("retry-after-refusal detection", () => {
 	it("retries Anthropic Fable classifier refusals with Opus", () => {
@@ -401,6 +413,74 @@ describe("retry-after-refusal extension wiring", () => {
 				kind: "error",
 			},
 		]);
+		expect(sentUserMessages).toEqual([]);
+	});
+
+	it("stops without retrying when PI_CLAUDE_AUTH_NO_OPUS_RETRY=1", async () => {
+		const handlers: Record<string, Handler[]> = {};
+		const notifications: unknown[] = [];
+		const sentUserMessages: unknown[] = [];
+		const selectedModels: unknown[] = [];
+		const pi = {
+			on(event: string, handler: Handler) {
+				handlers[event] = [...(handlers[event] ?? []), handler];
+			},
+			sendUserMessage(content: unknown, options: unknown) {
+				sentUserMessages.push({ content, options });
+			},
+			async setModel(model: unknown) {
+				selectedModels.push(model);
+				return true;
+			},
+		};
+		const ctx = {
+			model: {
+				provider: "anthropic",
+				id: "claude-fable-5",
+				name: "Claude Fable 5",
+			},
+			modelRegistry: {
+				find(_provider: string, id: string) {
+					if (id === "claude-opus-4-8")
+						return { provider: "anthropic", id, name: "Claude Opus 4.8" };
+					return undefined;
+				},
+			},
+			ui: {
+				notify(message: string, kind: string) {
+					notifications.push({ message, kind });
+				},
+			},
+		};
+
+		registerRetryAfterRefusal(pi);
+
+		process.env.PI_CLAUDE_AUTH_NO_OPUS_RETRY = "1";
+		await handlers.message_end?.[0]?.(
+			{ message: { role: "user", content: "Explain a risky topic" } },
+			ctx,
+		);
+		await handlers.message_end?.[0]?.(
+			{
+				message: {
+					role: "assistant",
+					provider: "anthropic",
+					model: "claude-fable-5",
+					stopReason: "error",
+					errorMessage: "The request was blocked by a safety classifier",
+				},
+			},
+			ctx,
+		);
+
+		expect(notifications).toEqual([
+			{
+				message:
+					"Claude Fable 5 returned an Anthropic classifier refusal. Not retrying with Opus (PI_CLAUDE_AUTH_NO_OPUS_RETRY=1).",
+				kind: "error",
+			},
+		]);
+		expect(selectedModels).toEqual([]);
 		expect(sentUserMessages).toEqual([]);
 	});
 });

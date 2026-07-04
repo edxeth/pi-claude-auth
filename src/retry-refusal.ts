@@ -166,6 +166,14 @@ export function registerRetryAfterRefusal(pi: RetryAfterRefusalPi): void {
 		if (!retry) return;
 
 		const refusedModelName = displayModelName(ctx, "anthropic", message.model);
+		if (process.env.PI_CLAUDE_AUTH_NO_OPUS_RETRY === "1") {
+			state.completeRetry();
+			ctx.ui?.notify(
+				`${refusedModelName} returned an Anthropic classifier refusal. Not retrying with Opus (PI_CLAUDE_AUTH_NO_OPUS_RETRY=1).`,
+				"error",
+			);
+			return;
+		}
 		const fallbackModel = ctx.modelRegistry.find(
 			"anthropic",
 			retry.fallbackModelId,
