@@ -97,6 +97,7 @@ The extension recovers only after Pi finishes the refusal. If the stream hangs b
 | `CLAUDE_CODE_ENTRYPOINT` | Override the billing entrypoint mirrored in the user-agent suffix. |
 | `ANTHROPIC_USER_AGENT` | Override the whole user-agent string. |
 | `PI_CLAUDE_AUTH_DEBUG` | Set `1` for opt-in diagnostic logging to `~/.pi/agent/pi-claude-auth-debug.log`. Secrets are redacted before anything is written. |
+| `PI_CLAUDE_AUTH_NO_OPUS_RETRY` | Set `1` to disable the Opus 4.8 retry on Fable/Mythos classifier refusals. The refusal is surfaced as a red notice and the chat stops instead of switching models. |
 
 ## Credits
 

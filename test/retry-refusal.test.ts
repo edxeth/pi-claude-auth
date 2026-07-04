@@ -403,4 +403,76 @@ describe("retry-after-refusal extension wiring", () => {
 		]);
 		expect(sentUserMessages).toEqual([]);
 	});
+
+	it("stops without retrying when PI_CLAUDE_AUTH_NO_OPUS_RETRY=1", async () => {
+		const handlers: Record<string, Handler[]> = {};
+		const notifications: unknown[] = [];
+		const sentUserMessages: unknown[] = [];
+		const selectedModels: unknown[] = [];
+		const pi = {
+			on(event: string, handler: Handler) {
+				handlers[event] = [...(handlers[event] ?? []), handler];
+			},
+			sendUserMessage(content: unknown, options: unknown) {
+				sentUserMessages.push({ content, options });
+			},
+			async setModel(model: unknown) {
+				selectedModels.push(model);
+				return true;
+			},
+		};
+		const ctx = {
+			model: {
+				provider: "anthropic",
+				id: "claude-fable-5",
+				name: "Claude Fable 5",
+			},
+			modelRegistry: {
+				find(_provider: string, id: string) {
+					if (id === "claude-opus-4-8")
+						return { provider: "anthropic", id, name: "Claude Opus 4.8" };
+					return undefined;
+				},
+			},
+			ui: {
+				notify(message: string, kind: string) {
+					notifications.push({ message, kind });
+				},
+			},
+		};
+
+		registerRetryAfterRefusal(pi);
+
+		process.env.PI_CLAUDE_AUTH_NO_OPUS_RETRY = "1";
+		try {
+			await handlers.message_end?.[0]?.(
+				{ message: { role: "user", content: "Explain a risky topic" } },
+				ctx,
+			);
+			await handlers.message_end?.[0]?.(
+				{
+					message: {
+						role: "assistant",
+						provider: "anthropic",
+						model: "claude-fable-5",
+						stopReason: "error",
+						errorMessage: "The request was blocked by a safety classifier",
+					},
+				},
+				ctx,
+			);
+		} finally {
+			delete process.env.PI_CLAUDE_AUTH_NO_OPUS_RETRY;
+		}
+
+		expect(notifications).toEqual([
+			{
+				message:
+					"Claude Fable 5 returned an Anthropic classifier refusal. Not retrying with Opus (PI_CLAUDE_AUTH_NO_OPUS_RETRY=1).",
+				kind: "error",
+			},
+		]);
+		expect(selectedModels).toEqual([]);
+		expect(sentUserMessages).toEqual([]);
+	});
 });
