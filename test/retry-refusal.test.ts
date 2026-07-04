@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import {
 	createRetryAfterRefusalState,
 	registerRetryAfterRefusal,
@@ -6,6 +6,18 @@ import {
 } from "../src/retry-refusal.ts";
 
 type Handler = (...args: unknown[]) => unknown;
+
+// Shield tests from an inherited PI_CLAUDE_AUTH_NO_OPUS_RETRY in the shell.
+let savedNoOpusRetry: string | undefined;
+beforeEach(() => {
+	savedNoOpusRetry = process.env.PI_CLAUDE_AUTH_NO_OPUS_RETRY;
+	delete process.env.PI_CLAUDE_AUTH_NO_OPUS_RETRY;
+});
+afterEach(() => {
+	if (savedNoOpusRetry === undefined)
+		delete process.env.PI_CLAUDE_AUTH_NO_OPUS_RETRY;
+	else process.env.PI_CLAUDE_AUTH_NO_OPUS_RETRY = savedNoOpusRetry;
+});
 
 describe("retry-after-refusal detection", () => {
 	it("retries Anthropic Fable classifier refusals with Opus", () => {
@@ -444,26 +456,22 @@ describe("retry-after-refusal extension wiring", () => {
 		registerRetryAfterRefusal(pi);
 
 		process.env.PI_CLAUDE_AUTH_NO_OPUS_RETRY = "1";
-		try {
-			await handlers.message_end?.[0]?.(
-				{ message: { role: "user", content: "Explain a risky topic" } },
-				ctx,
-			);
-			await handlers.message_end?.[0]?.(
-				{
-					message: {
-						role: "assistant",
-						provider: "anthropic",
-						model: "claude-fable-5",
-						stopReason: "error",
-						errorMessage: "The request was blocked by a safety classifier",
-					},
+		await handlers.message_end?.[0]?.(
+			{ message: { role: "user", content: "Explain a risky topic" } },
+			ctx,
+		);
+		await handlers.message_end?.[0]?.(
+			{
+				message: {
+					role: "assistant",
+					provider: "anthropic",
+					model: "claude-fable-5",
+					stopReason: "error",
+					errorMessage: "The request was blocked by a safety classifier",
 				},
-				ctx,
-			);
-		} finally {
-			delete process.env.PI_CLAUDE_AUTH_NO_OPUS_RETRY;
-		}
+			},
+			ctx,
+		);
 
 		expect(notifications).toEqual([
 			{
