@@ -11,6 +11,7 @@ import {
 	getRefusalMode,
 	registerRetryAfterRefusal,
 	shouldHandleRefusal,
+	supportsCommandDispatch,
 } from "../src/retry-refusal.ts";
 
 type Handler = (...args: unknown[]) => unknown;
@@ -97,6 +98,10 @@ interface HarnessOptions {
 	mode?: "tui" | "rpc" | "json" | "print";
 	refusedModel?: { provider: string; id: string; name: string };
 	editorDraft?: string;
+	piVersion?: string;
+	/** Simulate another extension owning the bare command name (pi renames
+	 * duplicates with numeric suffixes, breaking bare-name dispatch). */
+	commandNameCollision?: boolean;
 	session?: SessionManager;
 	trigger?: "toolResult" | "user";
 	initializeSession?: boolean;
@@ -110,9 +115,15 @@ function createHarness(options: HarnessOptions = {}) {
 	const appendedEntries: unknown[] = [];
 	const editorValues: string[] = [];
 	const selectedModels: unknown[] = [];
-	const menuChoices: string[][] = [];
+	const commands: Record<string, { handler: (...args: unknown[]) => unknown }> =
+		{};
+	const sentUserMessages: Array<{ text: string; options: unknown }> = [];
+	const navigateTreeCalls: Array<{ targetId: string }> = [];
+	const dispatches: Promise<unknown>[] = [];
 	let menuCalls = 0;
 	let editorText = options.editorDraft ?? "";
+	let idleGateOpen = true;
+	let idleWaiters: Array<() => void> = [];
 
 	const refusedModel = options.refusedModel ?? {
 		provider: "anthropic",
@@ -144,6 +155,16 @@ function createHarness(options: HarnessOptions = {}) {
 		on(event: string, handler: Handler) {
 			handlers[event] = [...(handlers[event] ?? []), handler];
 		},
+		registerCommand(name: string, definition: { handler: Handler }) {
+			commands[name] = definition;
+		},
+		getCommands() {
+			if (options.commandNameCollision) return [];
+			return Object.keys(commands).map((name) => ({
+				name,
+				source: "extension",
+			}));
+		},
 		appendEntry(customType: string, data: unknown) {
 			appendedEntries.push({ customType, data });
 			session.appendCustomEntry(customType, data);
@@ -151,7 +172,22 @@ function createHarness(options: HarnessOptions = {}) {
 		sendMessage(message: unknown, sendOptions: unknown) {
 			sentMessages.push({ message, options: sendOptions });
 		},
-		sendUserMessage() {},
+		sendUserMessage(text: string, sendOptions?: { expandPromptTemplates?: boolean }) {
+			sentUserMessages.push({ text, options: sendOptions });
+			// Mirror AgentSession.prompt(): commands dispatched with
+			// expandPromptTemplates execute immediately and record nothing.
+			if (sendOptions?.expandPromptTemplates && text.startsWith("/")) {
+				const spaceIndex = text.indexOf(" ");
+				const name = spaceIndex === -1 ? text.slice(1) : text.slice(1, spaceIndex);
+				const args = spaceIndex === -1 ? "" : text.slice(spaceIndex + 1);
+				const command = commands[name];
+				if (command) {
+					dispatches.push(
+						(async () => command.handler(args, commandCtx))(),
+					);
+				}
+			}
+		},
 		async setModel(model: unknown) {
 			selectedModels.push(model);
 			return true;
@@ -185,7 +221,6 @@ function createHarness(options: HarnessOptions = {}) {
 			},
 			async select(_title: string, choices: string[]) {
 				menuCalls++;
-				menuChoices.push(choices);
 				if (options.action === "continue") return choices[0];
 				if (options.action === "edit") return choices[1];
 				return undefined;
@@ -193,16 +228,75 @@ function createHarness(options: HarnessOptions = {}) {
 		},
 	};
 
-	registerRetryAfterRefusal(pi);
+	const commandCtx = {
+		mode,
+		hasUI: mode === "tui" || mode === "rpc",
+		model: refusedModel,
+		modelRegistry: ctx.modelRegistry,
+		sessionManager: session,
+		ui: ctx.ui,
+		waitForIdle: async () => {
+			if (!idleGateOpen) {
+				await new Promise<void>((resolve) => idleWaiters.push(resolve));
+			}
+		},
+		navigateTree: async (targetId: string) => {
+			navigateTreeCalls.push({ targetId });
+			// Mirrors pi 0.84.2 AgentSession.navigateTree() ordering exactly:
+			// the current-leaf no-op returns first (before any hook), then
+			// session_before_tree handlers are awaited, and only afterwards
+			// does the branch move happen.
+			if (targetId === session.getLeafId()) return { cancelled: false };
+			const oldLeafId = session.getLeafId();
+			const entry = session.getEntry(targetId);
+			if (!entry) throw new Error(`Entry ${targetId} not found`);
+			for (const handler of handlers.session_before_tree ?? []) {
+				const result = await handler({}, ctx);
+				if (result && typeof result === "object" && "cancel" in result) {
+					if ((result as { cancel: boolean }).cancel)
+						return { cancelled: true };
+				}
+			}
+			// Real semantics: user and custom messages lift their text to the
+			// editor and rewind to their parent; anything else becomes the leaf.
+			let newLeafId: string | null;
+			let editorText: string | undefined;
+			if (
+				entry.type === "message" &&
+				(entry.message as { role?: string }).role === "user"
+			) {
+				newLeafId = entry.parentId;
+				editorText = "";
+			} else if (entry.type === "custom_message") {
+				newLeafId = entry.parentId;
+				editorText = "";
+			} else {
+				newLeafId = targetId;
+			}
+			if (newLeafId === null) session.resetLeaf();
+			else session.branch(newLeafId);
+			for (const handler of handlers.session_tree ?? []) {
+				await handler({ newLeafId, oldLeafId }, ctx);
+			}
+			return { editorText, cancelled: false };
+		},
+	};
+
+	registerRetryAfterRefusal(pi, { piVersion: options.piVersion ?? "0.84.2" });
 	return {
 		appendedEntries,
+		blockIdle() {
+			idleGateOpen = false;
+		},
+		commands,
+		commandCtx,
 		ctx,
 		editorValues,
 		fallbackModel,
+		navigateTreeCalls,
 		get menuCalls() {
 			return menuCalls;
 		},
-		menuChoices,
 		handlers,
 		notifications,
 		/**
@@ -227,7 +321,16 @@ function createHarness(options: HarnessOptions = {}) {
 		},
 		selectedModels,
 		sentMessages,
+		sentUserMessages,
 		session,
+		releaseIdle() {
+			idleGateOpen = true;
+			for (const resolve of idleWaiters) resolve();
+			idleWaiters = [];
+		},
+		async settle() {
+			await Promise.all(dispatches);
+		},
 		triggerId,
 	};
 }
@@ -396,10 +499,11 @@ describe("interactive refusal handling", () => {
 		]);
 	});
 
-	it("branches directly at agent_end, persists the branch, and restores the draft", async () => {
+	it("dispatches a no-op refresh to the marker leaf and restores the draft", async () => {
 		const harness = createHarness({ action: "edit", editorDraft: "steer away" });
 
 		await harness.refuse();
+		await harness.settle();
 
 		expect(
 			harness.session.buildSessionContext().messages.map((message) => message.role),
@@ -411,6 +515,21 @@ describe("interactive refusal handling", () => {
 		});
 		expect(harness.appendedEntries).toHaveLength(1);
 		expect(harness.editorValues).toEqual(["steer away"]);
+		// The refresh no-op-navigates to the marker leaf: the view re-renders
+		// without any branch move, so nothing can be branched over.
+		expect(harness.sentUserMessages).toEqual([
+			{
+				text: "/claude-refusal-rewind",
+				options: { expandPromptTemplates: true },
+			},
+		]);
+		expect(harness.navigateTreeCalls).toEqual([
+			{ targetId: harness.session.getLeafId() },
+		]);
+		expect(harness.session.getLeafEntry()).toMatchObject({
+			type: "custom",
+			customType: "claude-refusal-branch",
+		});
 	});
 
 	it("preserves tool B and rolls back the separate tool C turn", async () => {
@@ -452,6 +571,7 @@ describe("interactive refusal handling", () => {
 		});
 
 		const refusalId = await harness.refuse();
+		await harness.settle();
 
 		const activeBranchIds = harness.session.getBranch().map((entry) => entry.id);
 		expect(activeBranchIds).toContain(toolBResultId);
@@ -479,24 +599,29 @@ describe("interactive refusal handling", () => {
 		);
 		expect(activeToolCallIds).toEqual(["baseline-read", "log-scan"]);
 		expect(activeToolResultIds).toEqual(activeToolCallIds);
-		expect(harness.session.getLeafEntry()).toMatchObject({
+		const fileEntries = harness.session.getEntries();
+		expect(fileEntries[fileEntries.length - 1]).toMatchObject({
 			type: "custom",
 			parentId: toolBResultId,
 			customType: "claude-refusal-branch",
 		});
+		// The no-op refresh keeps the marker as the leaf.
+		expect(harness.session.getLeafId()).toBe(
+			fileEntries[fileEntries.length - 1].id,
+		);
 		expect(harness.editorValues).toEqual(["change course before tool C"]);
 
-		appendUser(harness.session, "Use the completed log scan and avoid tool C");
-		const nextProviderContext = (await harness.handlers.context[0]({}, harness.ctx)) as {
+		// The no-op refresh does not synchronize agent state, so the context
+		// repair hook stays armed and repairs provider requests from the branch.
+		const repaired = (await harness.handlers.context[0]({}, harness.ctx)) as {
 			messages: Array<{ role: string }>;
 		};
-		expect(nextProviderContext.messages.map((message) => message.role)).toEqual([
+		expect(repaired.messages.map((message) => message.role)).toEqual([
 			"user",
 			"assistant",
 			"toolResult",
 			"assistant",
 			"toolResult",
-			"user",
 		]);
 	});
 
@@ -591,9 +716,368 @@ describe("interactive refusal handling", () => {
 		const harness = createHarness();
 		const refusalId = await harness.refuse();
 		expect(harness.sentMessages).toEqual([]);
+		expect(harness.sentUserMessages).toEqual([]);
 		expect(harness.selectedModels).toEqual([]);
 		expect(harness.session.getLeafId()).toBe(refusalId);
 		expect(harness.appendedEntries).toEqual([]);
+	});
+});
+
+describe("dispatched rewind (pi >= 0.84.2)", () => {
+	it("rewinds synchronously, then no-op-refreshes the transcript at the marker leaf", async () => {
+		let toolAResultId = "";
+		const harness = createHarness({
+			action: "edit",
+			editorDraft: "try a safer tool",
+			setupSession(session) {
+				const callA = { id: "read-a", name: "read" };
+				const callB = { id: "bash-b", name: "bash" };
+				appendUser(session, "Investigate the deployment");
+				appendToolCalls(session, [callA]);
+				toolAResultId = appendToolResult(session, callA, "configuration");
+				appendToolCalls(session, [callB]);
+				appendToolResult(session, callB, "log scan output");
+			},
+		});
+
+		const refusalId = await harness.refuse();
+		await harness.settle();
+
+		// The rewind targets the first batch's tool result; the marker that
+		// persists the selection becomes the leaf the refresh navigates to.
+		expect(harness.navigateTreeCalls).toEqual([
+			{ targetId: harness.session.getLeafId() },
+		]);
+		expect(harness.sentUserMessages).toEqual([
+			{
+				text: "/claude-refusal-rewind",
+				options: { expandPromptTemplates: true },
+			},
+		]);
+
+		// The marker is appended when the rewind runs (before the dispatch), so
+		// the selected branch survives session reopenings: the file's last entry
+		// is the marker, parented at the navigation target.
+		expect(harness.appendedEntries).toEqual([
+			{
+				customType: "claude-refusal-branch",
+				data: { triggerId: harness.triggerId, targetId: toolAResultId },
+			},
+		]);
+		const fileEntries = harness.session.getEntries();
+		expect(fileEntries[fileEntries.length - 1]).toMatchObject({
+			type: "custom",
+			parentId: toolAResultId,
+			customType: "claude-refusal-branch",
+		});
+		// The no-op navigation moves nothing: the marker stays the leaf.
+		expect(harness.session.getLeafId()).toBe(
+			fileEntries[fileEntries.length - 1].id,
+		);
+		expect(
+			harness.session.getBranch().map((entry) => entry.id),
+		).not.toContain(refusalId);
+		expect(
+			harness.session
+				.buildSessionContext()
+				.messages.map((message) => message.role),
+		).toEqual(["user", "assistant", "toolResult"]);
+		// The no-op refresh does not synchronize agent state, so the context
+		// repair hook stays armed and keeps provider requests on the branch.
+		const repaired = (await harness.handlers.context[0]({}, harness.ctx)) as {
+			messages: Array<{ role: string }>;
+		};
+		expect(repaired.messages.map((message) => message.role)).toEqual([
+			"user",
+			"assistant",
+			"toolResult",
+		]);
+		// The draft survives: the TUI wrapper only fills an empty editor.
+		expect(harness.editorValues).toEqual(["try a safer tool"]);
+	});
+
+	it("keeps the rewound branch when the session is reopened", async () => {
+		const sessionDir = mkdtempSync(join(tmpdir(), "pi-claude-auth-rewind-"));
+		try {
+			const session = SessionManager.create("/tmp/rewind-test", sessionDir);
+			let toolResultId = "";
+			const harness = createHarness({
+				action: "edit",
+				session,
+				setupSession(sm) {
+					const callA = { id: "read-a", name: "read" };
+					const callB = { id: "bash-b", name: "bash" };
+					appendUser(sm, "Do the task");
+					appendToolCalls(sm, [callA]);
+					toolResultId = appendToolResult(sm, callA, "configuration");
+					appendToolCalls(sm, [callB]);
+					appendToolResult(sm, callB, "log scan output");
+				},
+			});
+			await harness.refuse();
+			await harness.settle();
+
+			const reopened = SessionManager.open(session.getSessionFile()!, sessionDir);
+			expect(
+				reopened.buildSessionContext().messages.map((message) => message.role),
+			).toEqual(["user", "assistant", "toolResult"]);
+			expect(reopened.getLeafEntry()).toMatchObject({
+				type: "custom",
+				parentId: toolResultId,
+				customType: "claude-refusal-branch",
+			});
+		} finally {
+			rmSync(sessionDir, { recursive: true, force: true });
+		}
+	});
+
+	it("cannot branch over input arriving during the navigation window", async () => {
+		const harness = createHarness({
+			action: "edit",
+			setupSession(session) {
+				const callA = { id: "read-a", name: "read" };
+				const callB = { id: "bash-b", name: "bash" };
+				appendUser(session, "Investigate the deployment");
+				appendToolCalls(session, [callA]);
+				appendToolResult(session, callA, "configuration");
+				appendToolCalls(session, [callB]);
+				appendToolResult(session, callB, "log scan output");
+			},
+		});
+
+		// Worst case from the first iteration: input lands while pi awaits
+		// session_before_tree hooks inside navigateTree(). A branch-moving
+		// navigation would run this handler and drop that input off the active
+		// branch; the no-op refresh returns before any hook, so the window
+		// never opens.
+		let treeHookRan = false;
+		harness.handlers.session_before_tree = [
+			async () => {
+				treeHookRan = true;
+				appendUser(harness.session, "input during tree hooks");
+				return undefined;
+			},
+		];
+
+		await harness.refuse();
+		await harness.settle();
+
+		expect(treeHookRan).toBe(false);
+		expect(harness.navigateTreeCalls).toEqual([
+			{ targetId: harness.session.getLeafId() },
+		]);
+		expect(
+			harness.session.buildSessionContext().messages.map((message) => message.role),
+		).toEqual(["user", "assistant", "toolResult"]);
+		expect(harness.session.getLeafEntry()).toMatchObject({
+			type: "custom",
+			customType: "claude-refusal-branch",
+		});
+		// The repair hook stays active because no supported navigation ran.
+		const context = (await harness.handlers.context[0]({}, harness.ctx)) as {
+			messages: Array<{ role: string }>;
+		};
+		expect(context.messages.map((message) => message.role)).toEqual([
+			"user",
+			"assistant",
+			"toolResult",
+		]);
+	});
+
+	it("stays on the pre-0.84.2 behavior when command dispatch is unavailable", async () => {
+		const harness = createHarness({
+			action: "edit",
+			piVersion: "0.84.1",
+		});
+
+		await harness.refuse();
+		await harness.settle();
+
+		expect(harness.commands).toEqual({});
+		expect(harness.sentUserMessages).toEqual([]);
+		expect(harness.navigateTreeCalls).toEqual([]);
+		// Direct rewind exactly as before: same branch, marker, and repair hook.
+		expect(
+			harness.session.buildSessionContext().messages.map((message) => message.role),
+		).toEqual(["user"]);
+		expect(harness.session.getLeafEntry()).toMatchObject({
+			type: "custom",
+			customType: "claude-refusal-branch",
+		});
+		const context = (await harness.handlers.context[0]({}, harness.ctx)) as {
+			messages: Array<{ role: string }>;
+		};
+		expect(context.messages.map((message) => message.role)).toEqual(["user"]);
+	});
+
+	it("rewinds without dispatching a refresh outside the TUI (rpc)", async () => {
+		// RPC has a remote UI, so the menu opens, but there is no TUI
+		// transcript to rebuild: the rewind and context repair must work
+		// without dispatching anything.
+		const harness = createHarness({ action: "edit", mode: "rpc" });
+
+		await harness.refuse();
+		await harness.settle();
+
+		expect(harness.sentUserMessages).toEqual([]);
+		expect(harness.navigateTreeCalls).toEqual([]);
+		expect(
+			harness.session.buildSessionContext().messages.map((message) => message.role),
+		).toEqual(["user"]);
+		expect(harness.session.getLeafEntry()).toMatchObject({
+			type: "custom",
+			customType: "claude-refusal-branch",
+		});
+		const context = (await harness.handlers.context[0]({}, harness.ctx)) as {
+			messages: Array<{ role: string }>;
+		};
+		expect(context.messages.map((message) => message.role)).toEqual(["user"]);
+	});
+
+	it("keeps queued input that ran after the rewind instead of branching over it", async () => {
+		const harness = createHarness({
+			action: "edit",
+			setupSession(session) {
+				const callA = { id: "read-a", name: "read" };
+				const callB = { id: "bash-b", name: "bash" };
+				appendUser(session, "Investigate the deployment");
+				appendToolCalls(session, [callA]);
+				appendToolResult(session, callA, "configuration");
+				appendToolCalls(session, [callB]);
+				appendToolResult(session, callB, "log scan output");
+			},
+		});
+
+		// The dispatched refresh parks on waitForIdle() while pi drains the
+		// input the user submitted during the refusal onto the repaired branch.
+		harness.blockIdle();
+		await harness.refuse();
+		// Nothing runs while the agent is still settling.
+		expect(harness.navigateTreeCalls).toEqual([]);
+		appendUser(harness.session, "queued while the refusal settled");
+		harness.releaseIdle();
+		await harness.settle();
+
+		// The navigation was skipped: branching to the rewind target would have
+		// removed the queued prompt from the active conversation.
+		expect(harness.navigateTreeCalls).toEqual([]);
+		expect(harness.notifications).toContainEqual({
+			message:
+				"New input arrived after the rewind, so the transcript was not refreshed. Visit /tree to refresh the view.",
+			kind: "info",
+		});
+		expect(
+			harness.session
+				.buildSessionContext()
+				.messages.map((message) => message.role),
+		).toEqual([
+			"user",
+			"assistant",
+			"toolResult",
+			"user", // the queued prompt, still on the repaired branch
+		]);
+		// The context repair hook stays armed because no supported navigation ran.
+		const context = (await harness.handlers.context[0]({}, harness.ctx)) as {
+			messages: Array<{ role: string }>;
+		};
+		expect(context.messages.map((message) => message.role)).toEqual([
+			"user",
+			"assistant",
+			"toolResult",
+			"user",
+		]);
+	});
+
+	it("ignores manual invocations with no pending refresh", async () => {
+		const harness = createHarness({
+			action: "edit",
+			setupSession(session) {
+				const callA = { id: "read-a", name: "read" };
+				const callB = { id: "bash-b", name: "bash" };
+				appendUser(session, "Investigate the deployment");
+				appendToolCalls(session, [callA]);
+				appendToolResult(session, callA, "configuration");
+				appendToolCalls(session, [callB]);
+				appendToolResult(session, callB, "log scan output");
+			},
+		});
+		await harness.refuse();
+		await harness.settle();
+
+		const command = harness.commands["claude-refusal-rewind"];
+		expect(command).toBeDefined();
+		const navigationsBefore = harness.navigateTreeCalls.length;
+		const markersBefore = harness.appendedEntries.length;
+		const targetEntry = harness.session.getLeafId()!;
+
+		// After the dispatched refresh consumed the pending leaf, further manual
+		// runs have nothing to act on and must not touch the session.
+		await command.handler("anything", harness.commandCtx);
+		await command.handler("", harness.commandCtx);
+		expect(harness.navigateTreeCalls).toHaveLength(navigationsBefore);
+		expect(harness.appendedEntries).toHaveLength(markersBefore);
+		expect(harness.session.getLeafId()).toBe(targetEntry);
+		expect(harness.notifications).toEqual([]);
+	});
+
+	it("falls back to the legacy behavior when another extension owns the command name", async () => {
+		const harness = createHarness({
+			action: "edit",
+			commandNameCollision: true,
+			setupSession(session) {
+				const callA = { id: "read-a", name: "read" };
+				const callB = { id: "bash-b", name: "bash" };
+				appendUser(session, "Investigate the deployment");
+				appendToolCalls(session, [callA]);
+				appendToolResult(session, callA, "configuration");
+				appendToolCalls(session, [callB]);
+				appendToolResult(session, callB, "log scan output");
+			},
+		});
+
+		await harness.refuse();
+		await harness.settle();
+
+		// pi renamed the duplicate command, so bare-name dispatch would submit
+		// literal text: the extension must not dispatch at all.
+		expect(harness.sentUserMessages).toEqual([]);
+		expect(harness.navigateTreeCalls).toEqual([]);
+		expect(
+			harness.session
+				.buildSessionContext()
+				.messages.map((message) => message.role),
+		).toEqual(["user", "assistant", "toolResult"]);
+		const context = (await harness.handlers.context[0]({}, harness.ctx)) as {
+			messages: Array<{ role: string }>;
+		};
+		expect(context.messages.map((message) => message.role)).toEqual([
+			"user",
+			"assistant",
+			"toolResult",
+		]);
+	});
+});
+
+describe("command dispatch support", () => {
+	it("tracks the pi release that added expandPromptTemplates", () => {
+		expect(supportsCommandDispatch("0.84.2")).toBe(true);
+		expect(supportsCommandDispatch("0.84.3")).toBe(true);
+		expect(supportsCommandDispatch("0.85.0")).toBe(true);
+		expect(supportsCommandDispatch("1.0.0")).toBe(true);
+		expect(supportsCommandDispatch("0.84.1")).toBe(false);
+		expect(supportsCommandDispatch("0.84.0")).toBe(false);
+		expect(supportsCommandDispatch("0.83.9")).toBe(false);
+	});
+	it("rejects prerelease, branch, and unparseable versions", () => {
+		// These may predate the dispatch feature; fail closed instead of
+		// guessing (a wrong guess submits command text as a literal prompt).
+		expect(supportsCommandDispatch("0.84.2-beta.1")).toBe(false);
+		expect(supportsCommandDispatch("0.84.2-dev.1")).toBe(false);
+		expect(supportsCommandDispatch("0.85.0-rc.1")).toBe(false);
+		expect(supportsCommandDispatch("0.84.2+build.5")).toBe(false);
+		expect(supportsCommandDispatch("main")).toBe(false);
+		expect(supportsCommandDispatch("")).toBe(false);
+		expect(supportsCommandDispatch("0.84")).toBe(false);
 	});
 });
 

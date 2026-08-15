@@ -59,7 +59,7 @@ Set `PI_CLAUDE_AUTH_REFUSAL_MODE=auto` to skip the question and always continue 
 
 ### Where Edit and retry stops
 
-The chat on your screen keeps showing the abandoned turn. Claude has the corrected history, so your next message behaves the way you expect, but the view is stale until you visit `/tree`, run `/reload`, or compact the session.
+On Pi 0.84.2 and newer, Edit and retry refreshes the chat automatically when the session is still at the rewind point. If newer input already moved the branch, that input is kept and the view stays as it is; visit `/tree` to refresh it. Older Pi versions keep the previous behavior, where the view stays stale until you visit `/tree`, run `/reload`, or compact the session.
 
 The rewind covers the conversation. Files written, commands run, and requests sent during the abandoned turn stay exactly as the model left them.
 

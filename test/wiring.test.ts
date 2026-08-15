@@ -13,6 +13,7 @@ type Handler = (...args: unknown[]) => unknown;
 interface SpyPi {
 	registeredProviders: Provider[];
 	handlers: Record<string, Handler[]>;
+	commands: Record<string, { description?: string }>;
 }
 
 function makeSpyPi(): SpyPi &
@@ -22,9 +23,11 @@ function makeSpyPi(): SpyPi &
 	} {
 	const registeredProviders: Provider[] = [];
 	const handlers: Record<string, Handler[]> = {};
+	const commands: Record<string, { description?: string }> = {};
 	return {
 		registeredProviders,
 		handlers,
+		commands,
 		// The extension calls the single-arg `registerProvider(provider)` overload.
 		registerProvider(provider: Provider) {
 			registeredProviders.push(provider);
@@ -32,6 +35,15 @@ function makeSpyPi(): SpyPi &
 		on(event, handler) {
 			handlers[event] ??= [];
 			handlers[event].push(handler);
+		},
+		registerCommand(name: string, definition: { description?: string }) {
+			commands[name] = definition;
+		},
+		getCommands() {
+			return Object.keys(commands).map((name) => ({
+				name,
+				source: "extension",
+			}));
 		},
 	};
 }
@@ -78,6 +90,11 @@ describe("extension wiring (Pi owns the OAuth lifecycle)", () => {
 
 		expect(spy.handlers.session_start?.length).toBeGreaterThan(0);
 		expect(spy.handlers.before_provider_request).toBeUndefined();
+		// pi >= 0.84.2: the internal rewind command powers automatic transcript
+		// refresh after "Edit and retry".
+		expect(spy.commands["claude-refusal-rewind"]).toMatchObject({
+			description: expect.stringContaining("classifier refusal"),
+		});
 	});
 
 	it("does not write to auth storage on session_start (Pi owns auth.json)", async () => {

@@ -3,10 +3,13 @@ import type {
 	ExtensionContext,
 	SessionManager,
 } from "@earendil-works/pi-coding-agent";
+import { VERSION } from "@earendil-works/pi-coding-agent";
 
 const OPUS_FALLBACK_MODEL_ID = "claude-opus-4-8";
 const CONTINUE_MESSAGE_TYPE = "claude-refusal-continue";
 const BRANCH_ENTRY_TYPE = "claude-refusal-branch";
+const REWIND_COMMAND = "claude-refusal-rewind";
+const MIN_PI_VERSION_FOR_DISPATCH = "0.84.2";
 
 interface AssistantRefusalCandidate {
 	role?: unknown;
@@ -56,6 +59,32 @@ export function getRefusalMode(): "ask" | "auto" {
 	return process.env.PI_CLAUDE_AUTH_REFUSAL_MODE?.toLowerCase() === "auto"
 		? "auto"
 		: "ask";
+}
+
+function parseVersion(version: string): [number, number, number] | null {
+	// Prerelease/build metadata ("0.84.2-beta.1"), branch names ("main"), and
+	// anything else non-numeric are unknown quantities: fail closed instead of
+	// guessing whether command dispatch exists.
+	const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(version);
+	return match
+		? [Number(match[1]), Number(match[2]), Number(match[3])]
+		: null;
+}
+
+/**
+ * Dispatching commands from event handlers requires pi >= 0.84.2, which added
+ * `expandPromptTemplates` to `pi.sendUserMessage()`. Older, prerelease, and
+ * unparseable versions record the command text as a literal user message, so
+ * they must keep the old behavior.
+ */
+export function supportsCommandDispatch(piVersion: string): boolean {
+	const version = parseVersion(piVersion);
+	const minimum = parseVersion(MIN_PI_VERSION_FOR_DISPATCH);
+	if (version === null || minimum === null) return false;
+	for (let i = 0; i < 3; i++) {
+		if (version[i] !== minimum[i]) return version[i] > minimum[i];
+	}
+	return true;
 }
 
 function displayModelName(
@@ -124,6 +153,12 @@ function hasRefusalBranchMarker(
 		);
 }
 
+/**
+ * navigateTree() moves the leaf *before* user and custom messages and lifts
+ * their text into the editor (pi's "edit that prompt" semantics). The refusal
+ * rewind must keep those entries in context, so targets navigateTree() would
+ * lift cannot use it.
+ */
 async function chooseRefusalAction(
 	ctx: ExtensionContext,
 	refusedModelName: string,
@@ -170,8 +205,18 @@ function lastAssistantMessage(
 	return undefined;
 }
 
-export function registerRetryAfterRefusal(pi: ExtensionAPI): void {
+export function registerRetryAfterRefusal(
+	pi: ExtensionAPI,
+	options: { piVersion?: string } = {},
+): void {
 	let needsContextRebuild = false;
+	const dispatchSupported = supportsCommandDispatch(
+		options.piVersion ?? VERSION,
+	);
+	// The session leaf the dispatched refresh command must still find before it
+	// rebuilds the transcript. Set right after the synchronous rewind; consumed
+	// once by the command.
+	let pendingRefreshLeafId: string | undefined;
 
 	// Only an extension reload leaves Pi's agent state behind: every other entry
 	// path rebuilds it from the session branch, which is already the repaired one.
@@ -216,6 +261,86 @@ export function registerRetryAfterRefusal(pi: ExtensionAPI): void {
 		);
 	}
 
+	// Rewind the session to `targetId` by direct SessionManager mutation and
+	// persist the selection with a hidden marker entry. Returns false when the
+	// leaf move itself failed.
+	function rewindDirectly(
+		ctx: ExtensionContext,
+		triggerId: string,
+		targetId: string | null,
+	): boolean {
+		const sm = ctx.sessionManager as unknown as SessionManager;
+		try {
+			if (targetId === null) sm.resetLeaf();
+			else sm.branch(targetId);
+		} catch {
+			ctx.ui.notify(
+				"Could not branch to the point before the refusal.",
+				"error",
+			);
+			return false;
+		}
+
+		try {
+			pi.appendEntry(BRANCH_ENTRY_TYPE, { triggerId, targetId });
+		} catch {
+			ctx.ui.notify(
+				"Branched before the refusal, but could not persist that branch selection.",
+				"warning",
+			);
+		}
+
+		needsContextRebuild = true;
+		return true;
+	}
+
+	if (dispatchSupported) {
+		pi.registerCommand(REWIND_COMMAND, {
+			description:
+				"Rewind the session after a classifier refusal (used automatically by pi-claude-auth)",
+			handler: async (_args, ctx) => {
+				const expectedLeafId = pendingRefreshLeafId;
+				pendingRefreshLeafId = undefined;
+				// The command is visible to users (autocomplete, getCommands()):
+				// without a pending refresh, manual runs are no-ops.
+				if (!expectedLeafId) return;
+
+				try {
+					await ctx.waitForIdle();
+					if (ctx.sessionManager.getLeafId() !== expectedLeafId) {
+						ctx.ui.notify(
+							"New input arrived after the rewind, so the transcript was not refreshed. Visit /tree to refresh the view.",
+							"info",
+						);
+						return;
+					}
+					// Navigating to the current leaf is a no-op in pi core — it
+					// returns before the awaited session_before_tree hooks, so no
+					// input can interleave and nothing is ever branched over —
+					// while the TUI wrapper still clears and re-renders the
+					// transcript. Agent state stays stale; the context hook
+					// below repairs every provider request.
+					await ctx.navigateTree(expectedLeafId);
+				} catch (error) {
+					ctx.ui.notify(
+						`Branched before the refusal, but could not refresh the transcript (${error instanceof Error ? error.message : String(error)}). Visit /tree or /reload to refresh it.`,
+						"warning",
+					);
+				}
+			},
+		});
+	}
+
+	// Fail closed on a name collision: pi gives duplicate commands
+	// colon-suffixed invocation names (e.g. `claude-refusal-rewind:1`), and
+	// dispatching the bare name would fall through to a literal user prompt
+	// instead of the command. Command names can change at runtime, and
+	// getCommands() cannot run during extension loading, so this is checked on
+	// every dispatch.
+	const dispatchAvailable = (): boolean =>
+		dispatchSupported &&
+		pi.getCommands().some((command) => command.name === REWIND_COMMAND);
+
 	// A classifier refusal ends the run, so `agent_end` always follows it, fires
 	// once, and — unlike `message_end` — runs after Pi has persisted the refusal.
 	// That persistence is what gives Edit a session entry to rewind from.
@@ -259,41 +384,26 @@ export function registerRetryAfterRefusal(pi: ExtensionAPI): void {
 		const targetId = computeBranchTarget(ctx.sessionManager, triggerId);
 		const draft = ctx.ui.getEditorText();
 
-		// Edit: move the session leaf to the safe parent, then append a hidden
-		// extension entry there. SessionManager persists entries, not leaf moves,
-		// so the marker makes the selected branch survive reopening the session.
-		// The context hook below keeps provider requests on that branch while
-		// Pi's private agent state remains stale.
-		//
-		// KNOWN LIMITATION: direct SessionManager mutation cannot rebuild Pi's
-		// visible transcript. It stays stale until a supported tree navigation,
-		// compaction, reload, or session replacement reconstructs the TUI.
-		// navigateTree() would do all of that, but it only exists on
-		// ExtensionCommandContext, and extension-sent messages bypass command
-		// dispatch (AgentSession.sendUserMessage disables command handling), so
-		// an event handler cannot reach it.
-		const sm = ctx.sessionManager as unknown as SessionManager;
-		try {
-			if (targetId === null) sm.resetLeaf();
-			else sm.branch(targetId);
-		} catch {
-			ctx.ui.notify(
-				"Could not branch to the point before the refusal.",
-				"error",
-			);
-			return;
-		}
+		// Edit: rewind synchronously — the same direct leaf move the extension
+		// has always done — then hand the prompt box back. The synchronous move
+		// is what keeps input queued while the refusal was settling safe: pi
+		// drains its queue only after this handler returns, so the queued prompt
+		// lands on the repaired branch. Afterwards the rewind marker is the
+		// session leaf; on pi >= 0.84.2 a dispatched internal command waits for
+		// idle, confirms the leaf is still that marker, and no-op-navigates to
+		// it so the TUI re-renders the repaired transcript.
+		if (!rewindDirectly(ctx, triggerId, targetId)) return;
 
-		try {
-			pi.appendEntry(BRANCH_ENTRY_TYPE, { triggerId, targetId });
-		} catch {
-			ctx.ui.notify(
-				"Branched before the refusal, but could not persist that branch selection.",
-				"warning",
-			);
+		// Only the TUI has a transcript to refresh; RPC has no view and print
+		// mode never reaches the interactive menu.
+		if (ctx.mode === "tui" && dispatchAvailable()) {
+			pendingRefreshLeafId = ctx.sessionManager.getLeafId() ?? undefined;
+			if (pendingRefreshLeafId) {
+				pi.sendUserMessage(`/${REWIND_COMMAND}`, {
+					expandPromptTemplates: true,
+				});
+			}
 		}
-
-		needsContextRebuild = true;
 		ctx.ui.setEditorText(draft);
 	});
 
