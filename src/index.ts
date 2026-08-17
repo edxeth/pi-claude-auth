@@ -6,6 +6,7 @@ import {
 	type ClaudeCodeVersionResolution,
 	type ClaudeCodeVersionStatus,
 	initializeClaudeCodeVersion,
+	revalidateClaudeCodeVersion,
 } from "./claude-version.ts";
 import { initLogger, log } from "./logger.ts";
 import { registerRetryAfterRefusal } from "./retry-refusal.ts";
@@ -15,36 +16,14 @@ import { FALLBACK_CC_VERSION } from "./signing.ts";
 
 const PROVIDER_ID = "anthropic";
 
-function formatRelativeDate(ms: number): string {
-	const diff = Date.now() - ms;
-	if (diff < 60_000) return "just now";
-	const mins = Math.floor(diff / 60_000);
-	if (mins < 60) return `${mins}m ago`;
-	const hours = Math.floor(mins / 60);
-	if (hours < 24) return `${hours}h ago`;
-	const days = Math.floor(hours / 24);
-	if (days < 30) return `${days}d ago`;
-	return new Date(ms).toISOString().slice(0, 10);
-}
-
 function buildVersionAlert(
 	status: ClaudeCodeVersionStatus,
-	version: string,
-	cachedAt?: number,
 ): { kind: "error" | "warning"; title: string; message: string } | null {
 	if (status === "fallback-after-fetch-failed") {
 		return {
 			kind: "error",
 			title: "pi-claude-auth: version fetch failed",
 			message: `No cached version — using fallback ${FALLBACK_CC_VERSION} which may be stale; requests may be rejected or billed as extra usage. Set ANTHROPIC_CLI_VERSION or restore network and restart pi.`,
-		};
-	}
-	if (status === "cache-after-fetch-failed") {
-		const when = cachedAt ? formatRelativeDate(cachedAt) : "cache";
-		return {
-			kind: "warning",
-			title: "pi-claude-auth: version fetch failed",
-			message: `Using cached ${version} (from ${when}); requests should still work but are not safe.`,
 		};
 	}
 	return null;
@@ -60,7 +39,7 @@ function showVersionAlert(
 	res: ClaudeCodeVersionResolution,
 ): void {
 	if (ctx.mode !== "tui") return;
-	const alert = buildVersionAlert(res.status, res.version, res.cachedAt);
+	const alert = buildVersionAlert(res.status);
 	if (!alert) return;
 	ctx.ui.notify(`${alert.title}\n${alert.message}`, alert.kind);
 }
@@ -115,8 +94,13 @@ const extension = async (pi: ExtensionAPI): Promise<void> => {
 	// silent). No credential work here: pi already loaded auth.json and prefers
 	// the OAuth token over ANTHROPIC_API_KEY.
 	pi.on("session_start", (event, ctx) => {
-		if (event.reason === "startup") {
-			showVersionAlert(ctx, versionResolution);
+		if (event.reason !== "startup") return;
+		showVersionAlert(ctx, versionResolution);
+		// Long-lived sessions refresh the cached version in the background.
+		// Headless (print) runs serve the cache as-is: a pending fetch would
+		// hold the process open at exit and tax every subagent child.
+		if (ctx.mode === "tui" && versionResolution.status === "cache") {
+			void revalidateClaudeCodeVersion();
 		}
 	});
 

@@ -13,7 +13,7 @@ const FETCH_TIMEOUT_MS = 2500;
 export type ClaudeCodeVersionStatus =
 	| "env"
 	| "npm"
-	| "cache-after-fetch-failed"
+	| "cache"
 	| "fallback-after-fetch-failed"
 	| "cache-offline"
 	| "fallback-offline";
@@ -101,11 +101,33 @@ async function fetchLatestVersion(): Promise<string | null> {
 }
 
 /**
+ * Refresh the discovered version and cache from the registry. Failures are
+ * silent: the run already holds a working cached version, and the next
+ * successful refresh self-heals the cache.
+ *
+ * Callers decide when this runs. Fire it without awaiting from long-lived
+ * (TUI) sessions only: in print mode a pending fetch holds the process open
+ * at exit, which taxes every headless subagent child.
+ */
+export async function revalidateClaudeCodeVersion(): Promise<void> {
+	const latest = await fetchLatestVersion();
+	if (!latest) return;
+	setDiscoveredCliVersion(latest);
+	await writeCachedVersion(latest, "npm").catch(() => {});
+	log("claude_code_version", { version: latest, source: "npm_background" });
+}
+
+/**
  * Resolve the Claude Code semver used by the user-agent and billing header.
  *
  * The cc_version suffix is computed per request in signing.ts; this resolver
  * only discovers the semver prefix. There is no fixed current "build hash" to
  * fetch for the suffix.
+ *
+ * Resolution is cache-first: a cached version is used immediately, so
+ * extension load never blocks on the network once a cache exists. Only the
+ * first-ever run (no cache) awaits the registry fetch. TUI sessions refresh
+ * the cache in the background via revalidateClaudeCodeVersion.
  *
  * Returns a status so callers can decide whether to surface a degraded/fallback
  * warning to the user. Offline resolutions (PI_OFFLINE=1) are treated as
@@ -142,26 +164,26 @@ export async function initializeClaudeCodeVersion(): Promise<ClaudeCodeVersionRe
 		return { version: FALLBACK_CC_VERSION, status: "fallback-offline" };
 	}
 
+	const cached = await readCachedVersion();
+	if (cached) {
+		setDiscoveredCliVersion(cached.version);
+		log("claude_code_version", {
+			version: cached.version,
+			source: "cache",
+		});
+		return {
+			version: cached.version,
+			status: "cache",
+			cachedAt: cached.fetchedAt,
+		};
+	}
+
 	const latest = await fetchLatestVersion();
 	if (latest) {
 		setDiscoveredCliVersion(latest);
 		await writeCachedVersion(latest, "npm").catch(() => {});
 		log("claude_code_version", { version: latest, source: "npm" });
 		return { version: latest, status: "npm" };
-	}
-
-	const cached = await readCachedVersion();
-	if (cached) {
-		setDiscoveredCliVersion(cached.version);
-		log("claude_code_version", {
-			version: cached.version,
-			source: "cache_after_fetch_failed",
-		});
-		return {
-			version: cached.version,
-			status: "cache-after-fetch-failed",
-			cachedAt: cached.fetchedAt,
-		};
 	}
 
 	setDiscoveredCliVersion(FALLBACK_CC_VERSION);

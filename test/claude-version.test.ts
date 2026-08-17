@@ -2,7 +2,10 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { initializeClaudeCodeVersion } from "../src/claude-version.ts";
+import {
+	initializeClaudeCodeVersion,
+	revalidateClaudeCodeVersion,
+} from "../src/claude-version.ts";
 import {
 	buildUserAgent,
 	getCliVersion,
@@ -70,14 +73,33 @@ describe("initializeClaudeCodeVersion", () => {
 		expect(res.status).toBe("npm");
 	});
 
-	it("returns 'cache-after-fetch-failed' when fetch fails but a cache exists", async () => {
+	it("returns the cache immediately with status 'cache' without fetching", async () => {
 		withCache(dir, "7.7.7");
-		globalThis.fetch = (async () =>
-			new Response("nope", { status: 500 })) as typeof fetch;
+		let fetched = false;
+		globalThis.fetch = (async () => {
+			fetched = true;
+			return new Response("nope", { status: 500 });
+		}) as typeof fetch;
 		const res = await initializeClaudeCodeVersion();
 		expect(res.version).toBe("7.7.7");
-		expect(res.status).toBe("cache-after-fetch-failed");
+		expect(res.status).toBe("cache");
 		expect(res.cachedAt).toBeDefined();
+		expect(fetched).toBe(false);
+	});
+
+	it("revalidateClaudeCodeVersion refreshes the discovered version and cache", async () => {
+		withCache(dir, "7.7.7");
+		globalThis.fetch = (async () =>
+			new Response(JSON.stringify({ version: "9.9.9" }), {
+				status: 200,
+				headers: { "content-type": "application/json" },
+			})) as typeof fetch;
+		const res = await initializeClaudeCodeVersion();
+		expect(res.version).toBe("7.7.7");
+		await revalidateClaudeCodeVersion();
+		expect(getCliVersion()).toBe("9.9.9");
+		const rerun = await initializeClaudeCodeVersion();
+		expect(rerun.version).toBe("9.9.9");
 	});
 
 	it("returns 'fallback-after-fetch-failed' when fetch fails and there is no cache", async () => {
