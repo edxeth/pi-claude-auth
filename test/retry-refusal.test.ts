@@ -336,12 +336,19 @@ function createHarness(options: HarnessOptions = {}) {
 }
 
 describe("refusal detection", () => {
-	it("handles Anthropic Fable 5 and Opus 5 classifier refusals", () => {
+	it("handles Anthropic Fable 5-family and Opus 5-family classifier refusals", () => {
 		expect(shouldHandleRefusal(fableRefusal)).toBe(true);
 		expect(
 			shouldHandleRefusal({
 				...fableRefusal,
 				model: "claude-opus-5",
+				errorMessage: "Safeguards flagged this response",
+			}),
+		).toBe(true);
+		expect(
+			shouldHandleRefusal({
+				...fableRefusal,
+				model: "claude-opus-5-5",
 				errorMessage: "Safeguards flagged this response",
 			}),
 		).toBe(true);

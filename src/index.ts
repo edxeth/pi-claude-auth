@@ -62,7 +62,8 @@ function showVersionAlert(
  * - Resolves the `cch` body checksum with a seeded XXH64 digest of the
  *   normalized, serialized request body (via a wrapped `fetch`), matching
  *   Claude Code 2.1.224 so requests stay valid even if Anthropic enforces cch.
- * - Handles Anthropic Fable 5 and Opus 5 classifier refusals with an
+ * - Handles Anthropic Fable 5-family and Opus 5-family classifier refusals
+ *   with an
  *   interactive branch-or-continue workflow.
  *
  * It deliberately does NOT register a custom `oauth` lifecycle: doing so would

@@ -43,7 +43,7 @@ If npm is unreachable, it falls back to that cache and shows a yellow notificati
 
 ## When Claude refuses
 
-Fable 5 and Opus 5 run some requests past a safety classifier. When it blocks one, your turn dies with an error instead of an answer, often after Claude has already done real work.
+The Fable 5 family (Fable 5, Fable 5.1) and the Opus 5 family (Opus 5, Opus 5 Fast, Opus 5.5) run some requests past a safety classifier. When it blocks one, your turn dies with an error instead of an answer, often after Claude has already done real work.
 
 Instead of leaving you with a dead turn, this extension pauses and offers two ways out.
 
@@ -53,7 +53,7 @@ Instead of leaving you with a dead turn, this extension pauses and offers two wa
 
 Press Escape to take neither and keep the refusal.
 
-Only Fable 5 and Opus 5 refusals count. Network timeouts, proxy errors, and other models pass straight through, and the Opus 4.8 continuation cannot set the whole thing off again.
+Only the Fable 5 and Opus 5 families count, matched on the model ID prefix (`claude-fable-5*`, `claude-opus-5*`). Network timeouts, proxy errors, and other models pass straight through, and the Opus 4.8 continuation cannot set the whole thing off again.
 
 Set `PI_CLAUDE_AUTH_REFUSAL_MODE=auto` to skip the question and always continue with Opus 4.8. Outside an interactive terminal (`-p`, JSON output) you get a message saying the turn was refused, and nothing else happens.
 
@@ -75,7 +75,7 @@ The extension steps in once the refusal has fully arrived. A stream that hangs i
 | `CLAUDE_CODE_ENTRYPOINT` | Override the entrypoint name sent in the billing header and user-agent. |
 | `ANTHROPIC_USER_AGENT` | Override the whole user-agent string. |
 | `PI_CLAUDE_AUTH_DEBUG` | Set `1` to write diagnostics to `~/.pi/agent/pi-claude-auth-debug.log`. The log redacts secrets. |
-| `PI_CLAUDE_AUTH_REFUSAL_MODE` | Refusal policy for Fable 5 and Opus 5: `ask` (default) or `auto`. |
+| `PI_CLAUDE_AUTH_REFUSAL_MODE` | Refusal policy for the Fable 5 and Opus 5 families: `ask` (default) or `auto`. |
 | `ENABLE_PROMPT_CACHING_1H` | Set `1`, `true`, `yes`, or `on` to use Claude Code's one-hour prompt-cache TTL for subscription requests. This overrides short retention. Pi's equivalent process-wide setting is `PI_CACHE_RETENTION=long`. |
 
 ## Credits
