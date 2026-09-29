@@ -1,28 +1,40 @@
 import { afterEach, describe, expect, it } from "bun:test";
-import type { Provider } from "@earendil-works/pi-ai";
-import { wrapAnthropicProvider } from "../src/anthropic-provider.ts";
+import type {
+	Api,
+	Model,
+	Provider,
+	ProviderHeaders,
+} from "@earendil-works/pi-ai";
+import {
+	createAnthropicStreamOverlay,
+	type AnthropicStreamOverlay,
+} from "../src/anthropic-provider.ts";
 
 interface RecordedCall {
 	method: "stream" | "streamSimple";
 	options: unknown;
 }
 
+const MODEL = {
+	id: "claude-sonnet-4-5",
+	api: "anthropic-messages",
+} as Model<Api>;
+
 /**
  * Minimal provider that records delegated calls. Only `id`/`stream`/`streamSimple`
- * matter for the wrap, so the rest of the Provider shape is stubbed out.
+ * matter for the overlay, so the rest of the Provider shape is stubbed out.
  */
-function recordingAnthropicProvider(): Provider & {
-	calls: RecordedCall[];
-} {
+function recordingAnthropicProvider():
+	Provider & { calls: RecordedCall[] } {
 	const calls: RecordedCall[] = [];
 	return {
 		id: "anthropic",
 		name: "anthropic",
-		stream(_model, _context, options) {
+		stream(_model: unknown, _context: unknown, options: unknown) {
 			calls.push({ method: "stream", options });
 			return {} as never;
 		},
-		streamSimple(_model, _context, options) {
+		streamSimple(_model: unknown, _context: unknown, options: unknown) {
 			calls.push({ method: "streamSimple", options });
 			return {} as never;
 		},
@@ -30,59 +42,117 @@ function recordingAnthropicProvider(): Provider & {
 	} as unknown as Provider & { calls: RecordedCall[] };
 }
 
-describe("wrapAnthropicProvider", () => {
+function overlayOver(fake: Provider & { calls: RecordedCall[] }): AnthropicStreamOverlay {
+	return createAnthropicStreamOverlay(fake);
+}
+
+describe("createAnthropicStreamOverlay", () => {
 	afterEach(() => {
 		delete process.env.ENABLE_PROMPT_CACHING_1H;
 	});
 
-	it("rejects a non-anthropic provider", () => {
+	it("rejects a non-anthropic base provider", () => {
 		expect(() =>
-			wrapAnthropicProvider({ id: "openai" } as Provider),
-		).toThrow(/cannot wrap/);
+			createAnthropicStreamOverlay({ id: "openai" } as Provider),
+		).toThrow(/cannot overlay/);
+	});
+
+	it("declares the anthropic-messages api and only a streamSimple handler", () => {
+		const overlay = overlayOver(recordingAnthropicProvider());
+		expect(overlay.api).toBe("anthropic-messages");
+		expect(typeof overlay.streamSimple).toBe("function");
+		// No models/baseUrl/oauth: the built-in provider must stay the base for
+		// the catalog and /login.
+		expect(overlay).not.toHaveProperty("models");
+		expect(overlay).not.toHaveProperty("baseUrl");
+		expect(overlay).not.toHaveProperty("oauth");
 	});
 
 	it("passes API-key requests through to the built-in provider unchanged", () => {
 		const fake = recordingAnthropicProvider();
-		const wrapped = wrapAnthropicProvider(fake);
+		const overlay = overlayOver(fake);
 		const opts = { apiKey: "sk-ant-api03-realapikey" };
 
-		wrapped.stream({} as never, {} as never, opts as never);
+		overlay.streamSimple(MODEL, {} as never, opts as never);
 
 		expect(fake.calls).toHaveLength(1);
-		// Same object reference: the wrap must not merge anything for API keys.
+		expect(fake.calls[0].method).toBe("streamSimple");
+		// Same object reference: the overlay must not merge anything for API keys.
 		expect(fake.calls[0].options).toBe(opts);
 	});
 
 	it("passes through when no options are given", () => {
 		const fake = recordingAnthropicProvider();
-		const wrapped = wrapAnthropicProvider(fake);
+		const overlay = overlayOver(fake);
 
-		wrapped.stream({} as never, {} as never, undefined);
+		overlay.streamSimple(MODEL, {} as never, undefined);
 
 		expect(fake.calls).toHaveLength(1);
+		expect(fake.calls[0].method).toBe("streamSimple");
 		expect(fake.calls[0].options).toBeUndefined();
 	});
 
-	it("merges Claude Code headers, wraps fetch, and chains onPayload for OAuth tokens", () => {
+	it("routes simple-shaped OAuth requests through streamSimple with Claude Code options merged", () => {
 		const fake = recordingAnthropicProvider();
-		const wrapped = wrapAnthropicProvider(fake);
+		const overlay = overlayOver(fake);
 
-		wrapped.stream({} as never, {} as never, {
+		overlay.streamSimple(MODEL, {} as never, {
 			apiKey: "sk-ant-oat-xyz",
+			reasoning: "high",
 		} as never);
 
 		expect(fake.calls).toHaveLength(1);
+		expect(fake.calls[0].method).toBe("streamSimple");
 		const merged = fake.calls[0].options as Record<string, unknown>;
-		const headers = merged.headers as Record<string, string>;
+		expect(merged.reasoning).toBe("high"); // simple fields survive the merge
+		const headers = merged.headers as ProviderHeaders;
 		expect(headers["user-agent"]).toMatch(/^claude-cli\/.*\(external, /);
 		expect(headers["x-app"]).toBe("cli");
 		expect(typeof merged.fetch).toBe("function");
 		expect(typeof merged.onPayload).toBe("function");
 	});
 
+	it("routes api-shaped options through the api-shaped stream entry point", () => {
+		const fake = recordingAnthropicProvider();
+		const overlay = overlayOver(fake);
+
+		overlay.streamSimple(MODEL, {} as never, {
+			apiKey: "sk-ant-api03-realapikey",
+			thinkingEnabled: true,
+			thinkingBudgetTokens: 2048,
+		} as never);
+
+		expect(fake.calls).toHaveLength(1);
+		// The api-shaped entry point keeps the caller's thinking options
+		// authoritative instead of re-deriving them from a reasoning level.
+		expect(fake.calls[0].method).toBe("stream");
+		const passed = fake.calls[0].options as Record<string, unknown>;
+		expect(passed.thinkingEnabled).toBe(true);
+		expect(passed.thinkingBudgetTokens).toBe(2048);
+	});
+
+	it("merges Claude Code options for api-shaped OAuth requests too", () => {
+		const fake = recordingAnthropicProvider();
+		const overlay = overlayOver(fake);
+
+		overlay.streamSimple(MODEL, {} as never, {
+			apiKey: "sk-ant-oat-xyz",
+			effort: "high",
+		} as never);
+
+		expect(fake.calls).toHaveLength(1);
+		expect(fake.calls[0].method).toBe("stream");
+		const merged = fake.calls[0].options as Record<string, unknown>;
+		expect(merged.effort).toBe("high");
+		const headers = merged.headers as ProviderHeaders;
+		expect(headers["user-agent"]).toMatch(/^claude-cli\/.*\(external, /);
+		expect(typeof merged.fetch).toBe("function");
+		expect(typeof merged.onPayload).toBe("function");
+	});
+
 	it("runs an existing onPayload before injecting the billing header", async () => {
 		const fake = recordingAnthropicProvider();
-		const wrapped = wrapAnthropicProvider(fake);
+		const overlay = overlayOver(fake);
 
 		const seen: unknown[] = [];
 		const priorTransform = (payload: unknown) => {
@@ -90,7 +160,7 @@ describe("wrapAnthropicProvider", () => {
 			return { ...(payload as object), priorRan: true };
 		};
 
-		wrapped.stream({} as never, {} as never, {
+		overlay.streamSimple(MODEL, {} as never, {
 			apiKey: "sk-ant-oat-xyz",
 			onPayload: priorTransform,
 		} as never);
@@ -120,27 +190,12 @@ describe("wrapAnthropicProvider", () => {
 		expect(result.system[0].text).toContain("x-anthropic-billing-header"); // billing injected after
 	});
 
-	it("streamSimple also merges options for OAuth tokens", () => {
-		const fake = recordingAnthropicProvider();
-		const wrapped = wrapAnthropicProvider(fake);
-
-		wrapped.streamSimple({} as never, {} as never, {
-			apiKey: "sk-ant-oat-xyz",
-		} as never);
-
-		expect(fake.calls).toHaveLength(1);
-		expect(fake.calls[0].method).toBe("streamSimple");
-		const merged = fake.calls[0].options as Record<string, unknown>;
-		expect((merged.headers as Record<string, string>)["x-app"]).toBe("cli");
-		expect(typeof merged.onPayload).toBe("function");
-	});
-
 	it("maps Claude Code's one-hour cache env var to Pi's long retention", () => {
 		process.env.ENABLE_PROMPT_CACHING_1H = "1";
 		const fake = recordingAnthropicProvider();
-		const wrapped = wrapAnthropicProvider(fake);
+		const overlay = overlayOver(fake);
 
-		wrapped.stream({} as never, {} as never, {
+		overlay.streamSimple(MODEL, {} as never, {
 			apiKey: "sk-ant-oat-xyz",
 			cacheRetention: "short",
 		} as never);
@@ -152,9 +207,9 @@ describe("wrapAnthropicProvider", () => {
 	it("does not change cache retention when the env var is disabled", () => {
 		process.env.ENABLE_PROMPT_CACHING_1H = "0";
 		const fake = recordingAnthropicProvider();
-		const wrapped = wrapAnthropicProvider(fake);
+		const overlay = overlayOver(fake);
 
-		wrapped.stream({} as never, {} as never, {
+		overlay.streamSimple(MODEL, {} as never, {
 			apiKey: "sk-ant-oat-xyz",
 			cacheRetention: "short",
 		} as never);

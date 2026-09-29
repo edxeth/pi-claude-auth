@@ -2,37 +2,47 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { Provider } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ProviderConfig } from "@earendil-works/pi-coding-agent";
 import loadExtension from "../src/index.ts";
 
 const originalFetch = globalThis.fetch;
 
 type Handler = (...args: unknown[]) => unknown;
 
+interface RegisteredOverlay {
+	id: string;
+	config: ProviderConfig;
+}
+
+/** The ExtensionAPI surface the extension uses, plus recorded call state. */
 interface SpyPi {
-	registeredProviders: Provider[];
+	registerProvider(name: string, config: ProviderConfig): void;
+	on(event: string, handler: Handler): void;
+	registerCommand(
+		name: string,
+		definition: { description?: string },
+	): void;
+	getCommands(): { name: string; source: string }[];
+	registeredOverlays: RegisteredOverlay[];
 	handlers: Record<string, Handler[]>;
 	commands: Record<string, { description?: string }>;
 }
 
-function makeSpyPi(): SpyPi &
-	Partial<ExtensionAPI> & {
-		registerProvider(provider: Provider): void;
-		on(event: string, handler: Handler): void;
-	} {
-	const registeredProviders: Provider[] = [];
+function makeSpyPi(): SpyPi {
+	const registeredOverlays: RegisteredOverlay[] = [];
 	const handlers: Record<string, Handler[]> = {};
 	const commands: Record<string, { description?: string }> = {};
 	return {
-		registeredProviders,
+		registeredOverlays,
 		handlers,
 		commands,
-		// The extension calls the single-arg `registerProvider(provider)` overload.
-		registerProvider(provider: Provider) {
-			registeredProviders.push(provider);
+		// The extension calls the two-arg `registerProvider(name, config)`
+		// overload: a named stream overlay, not a replacement native provider.
+		registerProvider(name: string, config: ProviderConfig) {
+			registeredOverlays.push({ id: name, config });
 		},
-		on(event, handler) {
+		on(event: string, handler: Handler) {
 			handlers[event] ??= [];
 			handlers[event].push(handler);
 		},
@@ -66,24 +76,29 @@ describe("extension wiring (Pi owns the OAuth lifecycle)", () => {
 		globalThis.fetch = originalFetch;
 	});
 
-	it("wraps pi's built-in anthropic provider (preserving its OAuth lifecycle)", async () => {
+	it("registers a named stream overlay (preserving catalog and OAuth lifecycle)", async () => {
 		// No auth.json present: the user has not logged in yet. The extension
-		// must still register the wrapped provider so `/login anthropic`
-		// (pi's built-in browser flow, inherited from the spread) is available.
+		// must still register the overlay so `/login anthropic` (pi's built-in
+		// browser flow, kept by leaving the built-in provider as the base) is
+		// available.
 		const spy = makeSpyPi();
 		await loadExtension(spy as unknown as ExtensionAPI);
 
-		expect(spy.registeredProviders).toHaveLength(1);
-		const anthropic = spy.registeredProviders[0];
-		expect(anthropic.id).toBe("anthropic");
-		// The wrap overrides stream/streamSimple; identity + credential config
-		// are inherited from the built-in spread, so /login is untouched.
-		expect(anthropic.stream).not.toBeUndefined();
-		expect(anthropic.streamSimple).not.toBeUndefined();
+		expect(spy.registeredOverlays).toHaveLength(1);
+		const overlay = spy.registeredOverlays[0];
+		expect(overlay.id).toBe("anthropic");
+		// The overlay only substitutes the stream handler for anthropic-messages
+		// models. No models/baseUrl/oauth fields: the catalog-enabled built-in
+		// provider stays the base, so the refreshed catalog and /login survive.
+		expect(overlay.config.api).toBe("anthropic-messages");
+		expect(typeof overlay.config.streamSimple).toBe("function");
+		expect(overlay.config.models).toBeUndefined();
+		expect(overlay.config.baseUrl).toBeUndefined();
+		expect(overlay.config.oauth).toBeUndefined();
 	});
 
 	it("registers session_start hooks and no before_provider_request hook", async () => {
-		// Billing injection now lives in the wrapped provider's onPayload, so the
+		// Billing injection now lives in the overlay's onPayload, so the
 		// before_provider_request hook is intentionally gone.
 		const spy = makeSpyPi();
 		await loadExtension(spy as unknown as ExtensionAPI);

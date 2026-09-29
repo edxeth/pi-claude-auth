@@ -1,6 +1,6 @@
 import type {
 	Api,
-	ApiStreamOptions,
+	AssistantMessageEventStream,
 	Context,
 	Model,
 	Provider,
@@ -76,40 +76,87 @@ function mergeClaudeCodeOptions<T extends StreamOptions>(options: T): T {
 }
 
 /**
- * Wrap Pi's built-in Anthropic provider so OAuth requests carry the Claude Code
- * billing header, identity headers, and a real `cch` body checksum. Non-OAuth
- * (API-key) requests are delegated unchanged.
- *
- * The original provider's credential lifecycle (browser `/login`, token refresh,
- * `~/.pi/agent/auth.json` storage) is preserved: only `stream`/`streamSimple`
- * are overridden, and only the per-request options are transformed.
+ * Options that only the api-shaped `Provider.stream` entry point carries.
+ * `SimpleStreamOptions` requests derive thinking from provider-neutral fields
+ * (`reasoning`, `thinkingBudgets`) instead, so their presence marks a request
+ * that must keep flowing through `streamSimple`.
  */
-export function wrapAnthropicProvider(provider: Provider): Provider {
-	if (provider.id !== "anthropic")
-		throw new Error(`pi-claude-auth cannot wrap provider "${provider.id}"`);
+const STREAM_ONLY_OPTION_KEYS = [
+	"thinkingEnabled",
+	"effort",
+	"thinkingBudgetTokens",
+] as const;
+
+function isApiShapedOptions(options?: SimpleStreamOptions): boolean {
+	if (!options) return false;
+	// Probe opaquely: these keys exist on the api-shaped option types, and the
+	// options bag crosses the composer collapsed into one untyped-in-practice
+	// handler.
+	const bag = options as Record<string, unknown>;
+	return STREAM_ONLY_OPTION_KEYS.some((key) => bag[key] !== undefined);
+}
+
+/**
+ * The catalog-preserving registration shape: a named stream overlay for pi's
+ * built-in Anthropic provider. Registering this via
+ * `pi.registerProvider("anthropic", overlay)` keeps pi's catalog-enabled
+ * built-in provider as the base, so its `getModels()`, `refreshModels()` (the
+ * pi.dev remote-catalog overlay that adds new models such as
+ * `claude-sonnet-5-5`), model filtering, and OAuth lifecycle (`/login`, token
+ * refresh, `~/.pi/agent/auth.json`) all stay intact. Replacing the whole
+ * provider instead would drop the dynamic catalog and freeze the static
+ * built-in model list.
+ *
+ * Pi's provider composer routes BOTH provider entry points (`stream` and
+ * `streamSimple`) into the overlay's single `streamSimple` handler for every
+ * `anthropic-messages` model. The handler routes back to the matching base
+ * entry point: api-shaped options keep the api-shaped contract (their thinking
+ * options are interpreted as-is rather than re-derived), everything else —
+ * including pi's session traffic, which always arrives via `streamSimple` —
+ * keeps the simple contract.
+ *
+ * OAuth requests (`sk-ant-oat` tokens) get the Claude Code billing header,
+ * identity headers, and a real `cch` body checksum merged into their options.
+ * Non-OAuth (API-key) requests are delegated unchanged and bill normally on
+ * their own.
+ */
+export interface AnthropicStreamOverlay {
+	api: Api;
+	streamSimple(
+		model: Model<Api>,
+		context: Context,
+		options?: SimpleStreamOptions,
+	): AssistantMessageEventStream;
+}
+
+/**
+ * Build the Claude Code stream overlay on top of pi's built-in Anthropic
+ * provider, which remains the streaming delegate (its stream methods dispatch
+ * straight to pi-ai's `anthropic-messages` implementation).
+ */
+export function createAnthropicStreamOverlay(
+	base: Provider,
+): AnthropicStreamOverlay {
+	if (base.id !== "anthropic")
+		throw new Error(
+			`pi-claude-auth cannot overlay provider "${base.id}"`,
+		);
+	// The options bag passes through opaquely: the composer collapsed the two
+	// entry points into one handler, so neither pi-ai parameter type fits both.
+	type StreamDelegate = (
+		model: Model<Api>,
+		context: Context,
+		options?: SimpleStreamOptions,
+	) => AssistantMessageEventStream;
 	return {
-		...provider,
-		stream<T extends Api>(
-			model: Model<T>,
-			context: Context,
-			options?: ApiStreamOptions<T>,
-		) {
+		api: "anthropic-messages",
+		streamSimple(model, context, options) {
+			const delegate: StreamDelegate = isApiShapedOptions(options)
+				? (m, c, o) => base.stream(m, c, o as never)
+				: (m, c, o) => base.streamSimple(m, c, o);
 			if (!options || !isAnthropicOAuthToken(options.apiKey))
-				return provider.stream(model, context, options);
-			return provider.stream(
-				model,
-				context,
-				mergeClaudeCodeOptions(options),
-			);
-		},
-		streamSimple(
-			model: Model<Api>,
-			context: Context,
-			options?: SimpleStreamOptions,
-		) {
-			if (!options || !isAnthropicOAuthToken(options.apiKey))
-				return provider.streamSimple(model, context, options);
-			return provider.streamSimple(
+				return delegate(model, context, options);
+			return delegate(
 				model,
 				context,
 				mergeClaudeCodeOptions(options),

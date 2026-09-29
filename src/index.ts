@@ -1,6 +1,7 @@
 import type {
 	ExtensionAPI,
 	ExtensionContext,
+	ProviderConfig,
 } from "@earendil-works/pi-coding-agent";
 import {
 	type ClaudeCodeVersionResolution,
@@ -11,7 +12,7 @@ import {
 import { initLogger, log } from "./logger.ts";
 import { registerRetryAfterRefusal } from "./retry-refusal.ts";
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
-import { wrapAnthropicProvider } from "./anthropic-provider.ts";
+import { createAnthropicStreamOverlay } from "./anthropic-provider.ts";
 import { FALLBACK_CC_VERSION } from "./signing.ts";
 
 const PROVIDER_ID = "anthropic";
@@ -49,7 +50,8 @@ function showVersionAlert(
  *
  * Pi's built-in `anthropic` provider owns the full OAuth lifecycle (browser
  * login, token refresh, credential storage in `~/.pi/agent/auth.json`) and the
- * Claude Code identity prompt. This extension wraps that provider so requests
+ * Claude Code identity prompt. This extension overlays that provider's
+ * streaming so requests
  * bill against the Claude Pro/Max
  * subscription plan instead of pay-as-you-go API credits or "extra usage":
  *
@@ -71,14 +73,22 @@ function showVersionAlert(
  * `/login anthropic` the usual pi way; pi loads the resulting `auth.json` entry
  * at startup, and its `getApiKey` already prefers that OAuth token over any
  * `ANTHROPIC_API_KEY` env var, so no credential re-injection is needed.
+ *
+ * It also deliberately registers only a NAMED STREAM OVERLAY
+ * (`pi.registerProvider("anthropic", { api, streamSimple })`), not a full
+ * replacement provider: pi then keeps its catalog-enabled built-in Anthropic
+ * provider as the base, so the refreshed pi.dev catalog (new models such as
+ * `claude-sonnet-5-5`) and the OAuth lifecycle survive extension loading.
  */
 const extension = async (pi: ExtensionAPI): Promise<void> => {
 	initLogger();
 	const versionResolution = await initializeClaudeCodeVersion();
 
-	// Wrap pi's built-in anthropic provider (preserving its OAuth lifecycle) so
-	// OAuth requests carry the Claude Code billing header, identity headers, and
-	// a real cch body checksum. No `oauth` field is registered, so `/login
+	// Register a named stream overlay on pi's built-in anthropic provider
+	// (preserving its model catalog and OAuth lifecycle) so OAuth requests carry
+	// the Claude Code billing header, identity headers, and a real cch body
+	// checksum. No `models`, `baseUrl`, or `oauth` field is registered: the
+	// built-in provider stays the base for model listing/refresh and `/login
 	// anthropic` keeps doing the real browser flow and writing auth.json.
 	const anthropic = builtinProviders().find(
 		(provider) => provider.id === PROVIDER_ID,
@@ -87,7 +97,14 @@ const extension = async (pi: ExtensionAPI): Promise<void> => {
 		throw new Error(
 			"pi-claude-auth could not load pi's built-in Anthropic provider",
 		);
-	pi.registerProvider(wrapAnthropicProvider(anthropic));
+	// The cast is a type-identity artifact, not a contract change: bun nests a
+	// second pi-ai copy under pi-agent-core, so the two AssistantMessageEventStream
+	// declarations never unify structurally. At runtime the overlay is plain data
+	// (api string + function) and satisfies ProviderConfig.
+	pi.registerProvider(
+		PROVIDER_ID,
+		createAnthropicStreamOverlay(anthropic) as unknown as ProviderConfig,
+	);
 
 	registerRetryAfterRefusal(pi);
 
