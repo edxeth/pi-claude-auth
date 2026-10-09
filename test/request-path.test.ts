@@ -116,6 +116,7 @@ describe("request behavior under the registered overlay", () => {
 
 	async function captureRequest(
 		apiKey: string,
+		sessionId = "req-path-session",
 	): Promise<CapturedRequest> {
 		const model = runtime.getModels("anthropic").find(
 			(entry) => entry.id === "claude-haiku-4-5",
@@ -123,6 +124,7 @@ describe("request behavior under the registered overlay", () => {
 		if (!model) throw new Error("static anthropic model missing");
 		const stream = runtime.streamSimple(model, context(), {
 			apiKey,
+			sessionId,
 			maxRetries: 0,
 		} as never);
 		await stream.result().catch(() => undefined); // the 500 stub errors the stream; the request is what we assert on
@@ -143,6 +145,30 @@ describe("request behavior under the registered overlay", () => {
 			/^claude-cli\/\d+\.\d+\.\d+ \(external, /u,
 		);
 		expect(request.headers.get("x-app")).toBe("cli");
+	});
+
+	it("carries the prompt/turn stamps in the billing block, matching headers, and the device fingerprint in the body", async () => {
+		const request = await captureRequest(OAUTH_TOKEN, "req-path-stamps");
+
+		expect(request.body).toMatch(
+			/cc_prompt_id=[0-9a-f-]{36}; cc_turn_origin=sdk; cc_prompt_index=0; cc_turn_index=1;/u,
+		);
+		// The transport header mirrors the billing block's prompt id.
+		const bodyPromptId = request.body.match(/cc_prompt_id=([0-9a-f-]{36});/)?.[1];
+		expect(request.headers.get("x-claude-code-prompt-id")).toBe(bodyPromptId);
+		expect(request.headers.get("x-claude-code-request-class")).toBe("main");
+		// metadata.user_id is attached and well-formed (device_id source mapping
+		// is covered by device-id/transform unit tests; homedir is not pinnable
+		// here), and the session id matches the transport session header.
+		const metadata = JSON.parse(request.body).metadata as { user_id: string };
+		expect(JSON.parse(metadata.user_id)).toMatchObject({
+			device_id: expect.stringMatching(/^[0-9a-f]{64}$/),
+			account_uuid: "",
+			session_id: "req-path-stamps",
+		});
+		expect(request.headers.get("x-claude-code-session-id")).toBe(
+			"req-path-stamps",
+		);
 	});
 
 	it("leaves API-key requests untouched", async () => {

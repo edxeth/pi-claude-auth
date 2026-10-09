@@ -3,13 +3,17 @@ import {
 	getCliVersion,
 	getEntrypoint,
 } from "./signing.ts";
+import type { DeviceIdentity } from "./device-id.ts";
+import { nextTurn } from "./turn.ts";
 
 const BILLING_PREFIX = "x-anthropic-billing-header";
 // Identity line pi's built-in provider emits for OAuth tokens (our trigger).
 const LEGACY_IDENTITY =
 	"You are Claude Code, Anthropic's official CLI for Claude.";
-// Identity line current Claude Code (2.1.224) sends; we substitute this for
-// pi's legacy line so the request matches real CC traffic.
+// Identity line current Claude Code sends in SDK/non-interactive mode; we
+// substitute this for pi's legacy line so the request matches real CC traffic.
+// (Interactive CC sends the legacy line itself; the SDK shape is the
+// internally consistent choice for our sdk-cli entrypoint.)
 const AGENT_SDK_IDENTITY =
 	"You are a Claude agent, built on Anthropic's Claude Agent SDK.";
 
@@ -24,6 +28,17 @@ interface AnthropicPayload {
 	model?: unknown;
 	system?: unknown;
 	messages?: unknown;
+	metadata?: unknown;
+}
+
+/**
+ * Per-request billing context resolved by the overlay: the session id (also
+ * sent as X-Claude-Code-Session-Id) and the discovered device identity (null
+ * when ~/.claude.json is absent, in which case no metadata is sent).
+ */
+export interface BillingContext {
+	sessionId?: string;
+	device: DeviceIdentity | null;
 }
 
 function isClaudeModel(model: unknown): model is string {
@@ -46,19 +61,23 @@ function entryText(entry: unknown): string {
  * pi opens OAuth requests with its legacy Claude Code identity at system[0],
  * followed by whatever system prompt the agent supplied. This function:
  *
- * - Prepends the `x-anthropic-billing-header` block as system[0].
- * - Swaps pi's legacy identity for the Agent SDK identity Claude Code 2.1.224
- *   sends (system[1]).
+ * - Prepends the `x-anthropic-billing-header` block as system[0], including
+ *   the prompt/turn stamps real CC sends (cc_prompt_id and friends).
+ * - Swaps pi's legacy identity for the Agent SDK identity Claude Code sends
+ *   (system[1]).
  * - Relocates every other system block (pi's prompt, other extensions' prompts)
  *   into the first user message. This move is mandatory: a live test confirmed
  *   that leaving any third-party system block in system[] makes Anthropic bill
  *   the request as extra usage.
+ * - Adds `metadata.user_id` (device_id/account_uuid/session_id) when a device
+ *   identity was discovered, matching the body fingerprint real CC sends.
  *
  * Returns the mutated payload when transformed, or undefined to leave it
  * unchanged (non-Claude requests, non-OAuth requests, already-transformed).
  */
 export function injectBillingHeader(
 	payload: unknown,
+	ctx: BillingContext = { device: null },
 ): AnthropicPayload | undefined {
 	if (!payload || typeof payload !== "object") return undefined;
 
@@ -82,10 +101,12 @@ export function injectBillingHeader(
 		role?: string;
 		content?: string | Array<{ type?: string; text?: string }>;
 	}>;
+	const turn = nextTurn(ctx.sessionId ?? "session", messages);
 	const billingHeader = buildBillingHeaderValue(
 		messages,
 		getCliVersion(),
 		getEntrypoint(),
+		turn,
 	);
 
 	// Drop pi's legacy identity and relocate every other system block (pi's real
@@ -139,6 +160,20 @@ export function injectBillingHeader(
 				content.unshift(prefixBlock);
 			}
 		}
+	}
+
+	// Body fingerprint real CC sends; the cch digest covers it because the
+	// checksum is resolved after serialization over this exact body.
+	if (ctx.device) {
+		const userId = JSON.stringify({
+			device_id: ctx.device.deviceId,
+			account_uuid: ctx.device.accountUuid,
+			session_id: ctx.sessionId ?? "",
+		});
+		p.metadata =
+			p.metadata && typeof p.metadata === "object"
+				? { ...p.metadata, user_id: userId }
+				: { user_id: userId };
 	}
 
 	return p;

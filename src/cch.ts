@@ -6,9 +6,10 @@ import { log } from "./logger.ts";
  *
  * The billing header carries a `cch=00000` placeholder. After the Anthropic SDK
  * serializes the final request body, {@link patchClaudeCodeCch} replaces that
- * placeholder with a 5-hex XXH64 digest of the normalized body. This mirrors
- * `@anthropic-ai/claude-code` 2.1.224 so the request bills against the Claude
- * Pro/Max subscription instead of pay-as-you-go / "extra usage".
+ * placeholder with a 5-hex XXH64 digest of the normalized body. Verified
+ * byte-for-byte against real `@anthropic-ai/claude-code` 2.1.295 first-party
+ * traffic, so the request bills against the Claude Pro/Max subscription
+ * instead of pay-as-you-go / "extra usage".
  *
  * Ported from the pi-black reference implementation, which was recovered from
  * real Claude Code traffic and is verified against the same test vectors.
@@ -153,7 +154,9 @@ export function patchClaudeCodeCch(serializedBody: string): string {
 		throw new Error("pi-claude-auth OAuth request has an invalid billing block");
 	}
 	if (!billingText.includes(CCH_PLACEHOLDER)) {
-		if (/; cch=[0-9a-f]{5};$/u.test(billingText)) return serializedBody;
+		// Already-resolved bodies are passed through untouched. The check is not
+		// end-anchored: real billing blocks carry prompt/turn fields after cch.
+		if (/; cch=[0-9a-f]{5};/u.test(billingText)) return serializedBody;
 		throw new Error(
 			"pi-claude-auth OAuth request has an invalid cch billing value",
 		);
@@ -191,8 +194,18 @@ function requestHeaders(
 }
 
 /**
+ * Extract the resolved prompt id from a patched billing block, so the
+ * x-claude-code-prompt-id transport header carries the same UUID the billing
+ * header already stamped (real CC keeps the two in lockstep).
+ */
+function promptIdFromBilling(serializedBody: string): string | null {
+	return serializedBody.match(/cc_prompt_id=([0-9a-f-]{36});/)?.[1] ?? null;
+}
+
+/**
  * Wrap a fetch implementation so every Claude Code OAuth request carries a
- * fresh `x-client-request-id` and has its `cch` placeholder resolved against
+ * fresh `x-client-request-id`, the billing block's prompt id as
+ * `x-claude-code-prompt-id`, and has its `cch` placeholder resolved against
  * the final serialized body (the only point that owns the real body bytes).
  */
 export function createClaudeCodeFetch(
@@ -207,6 +220,9 @@ export function createClaudeCodeFetch(
 			const patched = patchClaudeCodeCch(init.body);
 			const cch = patched.match(/cch=([0-9a-f]{5});/)?.[1];
 			log("cch_patched", { cch });
+			const promptId = promptIdFromBilling(patched);
+			if (promptId && !headers.has("x-claude-code-prompt-id"))
+				headers.set("x-claude-code-prompt-id", promptId);
 			return fetchImplementation(input, {
 				...init,
 				headers,
@@ -218,6 +234,9 @@ export function createClaudeCodeFetch(
 			const patched = patchClaudeCodeCch(body);
 			const cch = patched.match(/cch=([0-9a-f]{5});/)?.[1];
 			log("cch_patched", { cch });
+			const promptId = promptIdFromBilling(patched);
+			if (promptId && !headers.has("x-claude-code-prompt-id"))
+				headers.set("x-claude-code-prompt-id", promptId);
 			const request = new Request(input, { headers, body: patched });
 			return fetchImplementation(request);
 		}

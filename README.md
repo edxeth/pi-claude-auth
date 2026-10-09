@@ -33,7 +33,11 @@ Three things have to line up before Anthropic bills a request to your plan: a va
 
 Anthropic rejects requests that carry someone else's system prompt next to the Claude Code identity, so the extension moves Pi's system prompt into your first message. Your instructions still reach the model.
 
-The billing header also carries a `cch` checksum that Claude Code computes over the request body. This extension computes it the same way Claude Code does — a seeded hash of the normalized, serialized body, applied after Pi serializes the request — so the request matches real Claude Code traffic even if Anthropic starts checking the value. It only applies to your subscription (OAuth) login; plain API-key requests pass through unchanged.
+The billing header also carries a `cch` checksum that Claude Code computes over the request body. This extension computes it the same way Claude Code does — a seeded hash of the normalized, serialized body, applied after Pi serializes the request — so the request matches real Claude Code traffic. The algorithm and every field of the billing block are verified byte-for-byte against real Claude Code 2.1.295 first-party traffic. Alongside the checksum, the block carries the prompt/turn stamps real Claude Code sends (`cc_prompt_id`, `cc_turn_origin`, `cc_prompt_index`, `cc_turn_index`), tracked per session with tool-result continuations counted as further turns of the same prompt. The matching `x-claude-code-prompt-id` and `x-claude-code-request-class` transport headers ride along on every OAuth request.
+
+Real Claude Code also fingerprints the machine in the request body (`metadata.user_id` with a device id, an account uuid, and the session id). If you have ever run Claude Code on this machine, the extension reads that device id and account uuid from `~/.claude.json` and sends the same fingerprint. Without that file there is nothing faithful to send, so `metadata.user_id` is omitted rather than invented.
+
+All of this applies only to your subscription (OAuth) login; plain API-key requests pass through unchanged. The `anthropic-beta` feature flags follow Pi's built-in provider (feature-driven), which is an intentional divergence from Claude Code's own longer list: claiming betas whose wire effects Pi does not implement would risk unparseable responses for a weak fidelity gain.
 
 ### Staying on the current version
 

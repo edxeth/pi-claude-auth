@@ -9,21 +9,25 @@ import type {
 	StreamOptions,
 } from "@earendil-works/pi-ai";
 import { createClaudeCodeFetch, isAnthropicOAuthToken } from "./cch.ts";
+import type { DeviceIdentity } from "./device-id.ts";
 import { log } from "./logger.ts";
 import { buildUserAgent } from "./signing.ts";
 import { injectBillingHeader } from "./transforms.ts";
 
 /**
  * Claude Code identity headers added to every OAuth request. The wrapped fetch
- * additionally injects `x-client-request-id` per request. Pi's built-in
- * provider already sends `user-agent: claude-cli/<version>` and `x-app: cli`
- * for OAuth tokens, but `options.headers` is merged last and wins, so the full
- * `claude-cli/<version> (external, <entrypoint>)` form overrides it.
+ * additionally injects `x-client-request-id` and `x-claude-code-prompt-id` per
+ * request. Pi's built-in provider already sends `user-agent: claude-cli/<version>`
+ * and `x-app: cli` for OAuth tokens, but `options.headers` is merged last and
+ * wins, so the full `claude-cli/<version> (external, <entrypoint>)` form
+ * overrides it. `x-claude-code-request-class: main` marks session traffic the
+ * way real first-party requests do.
  */
 function claudeCodeHeaders(sessionId: string | undefined): ProviderHeaders {
 	return {
 		"user-agent": buildUserAgent(),
 		"x-app": "cli",
+		"x-claude-code-request-class": "main",
 		...(sessionId ? { "x-claude-code-session-id": sessionId } : {}),
 	};
 }
@@ -41,13 +45,17 @@ function oneHourCacheEnabled(): boolean {
  * - Wraps the transport with {@link createClaudeCodeFetch} so the `cch`
  *   placeholder is resolved against the final serialized body.
  * - Chains `onPayload`: runs any pre-existing transform first, then applies
- *   {@link injectBillingHeader} (billing block + system relocation) to the
- *   result, so other extensions' payload transforms compose correctly.
+ *   {@link injectBillingHeader} (billing block + system relocation + device
+ *   metadata) to the result, so other extensions' payload transforms compose
+ *   correctly.
  *
  * Only applied to OAuth tokens (`sk-ant-oat`); plain API-key requests pass
  * through the built-in provider untouched and bill normally on their own.
  */
-function mergeClaudeCodeOptions<T extends StreamOptions>(options: T): T {
+function mergeClaudeCodeOptions<T extends StreamOptions>(
+	options: T,
+	device: DeviceIdentity | null,
+): T {
 	const originalOnPayload = options.onPayload;
 	const transport = options.fetch ?? globalThis.fetch;
 	return {
@@ -60,7 +68,10 @@ function mergeClaudeCodeOptions<T extends StreamOptions>(options: T): T {
 		onPayload: async (payload, model) => {
 			const prior = await originalOnPayload?.(payload, model);
 			try {
-				const updated = injectBillingHeader(prior ?? payload);
+				const updated = injectBillingHeader(prior ?? payload, {
+					sessionId: options.sessionId,
+					device,
+				});
 				if (updated) {
 					log("billing_header_injected", {});
 					return updated;
@@ -133,9 +144,13 @@ export interface AnthropicStreamOverlay {
  * Build the Claude Code stream overlay on top of pi's built-in Anthropic
  * provider, which remains the streaming delegate (its stream methods dispatch
  * straight to pi-ai's `anthropic-messages` implementation).
+ *
+ * `device` is the ~/.claude.json identity resolved once at startup (null when
+ * absent); it rides into every OAuth request's metadata.user_id.
  */
 export function createAnthropicStreamOverlay(
 	base: Provider,
+	device: DeviceIdentity | null = null,
 ): AnthropicStreamOverlay {
 	if (base.id !== "anthropic")
 		throw new Error(
@@ -159,7 +174,7 @@ export function createAnthropicStreamOverlay(
 			return delegate(
 				model,
 				context,
-				mergeClaudeCodeOptions(options),
+				mergeClaudeCodeOptions(options, device),
 			);
 		},
 	};

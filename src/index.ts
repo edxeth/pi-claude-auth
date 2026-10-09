@@ -13,6 +13,7 @@ import { initLogger, log } from "./logger.ts";
 import { registerRetryAfterRefusal } from "./retry-refusal.ts";
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 import { createAnthropicStreamOverlay } from "./anthropic-provider.ts";
+import { loadClaudeCodeIdentity } from "./device-id.ts";
 import { FALLBACK_CC_VERSION } from "./signing.ts";
 
 const PROVIDER_ID = "anthropic";
@@ -62,8 +63,12 @@ function showVersionAlert(
  *   relocates pi's own system prompt into the first user message (Anthropic
  *   rejects third-party system prompts alongside the Claude Code identity).
  * - Resolves the `cch` body checksum with a seeded XXH64 digest of the
- *   normalized, serialized request body (via a wrapped `fetch`), matching
- *   Claude Code 2.1.224 so requests stay valid even if Anthropic enforces cch.
+ *   normalized, serialized request body (via a wrapped `fetch`), verified
+ *   against real Claude Code 2.1.295 so requests stay valid even if Anthropic
+ *   enforces cch. Stamps the billing block with real CC's prompt/turn fields
+ *   (cc_prompt_id et al.), mirrors the prompt id into the
+ *   x-claude-code-prompt-id transport header, and sends the machine's
+ *   ~/.claude.json identity as metadata.user_id.
  * - Handles Anthropic Fable 5-family and Opus 5-family classifier refusals
  *   with an
  *   interactive branch-or-continue workflow.
@@ -83,6 +88,11 @@ function showVersionAlert(
 const extension = async (pi: ExtensionAPI): Promise<void> => {
 	initLogger();
 	const versionResolution = await initializeClaudeCodeVersion();
+	// Startup-only reads: the newest Claude Code release and the machine's
+	// ~/.claude.json identity. A missing identity file is normal (never ran real
+	// Claude Code here) and only means metadata.user_id is omitted.
+	const deviceIdentity = await loadClaudeCodeIdentity();
+	log("device_identity", { found: deviceIdentity !== null });
 
 	// Register a named stream overlay on pi's built-in anthropic provider
 	// (preserving its model catalog and OAuth lifecycle) so OAuth requests carry
@@ -103,7 +113,7 @@ const extension = async (pi: ExtensionAPI): Promise<void> => {
 	// (api string + function) and satisfies ProviderConfig.
 	pi.registerProvider(
 		PROVIDER_ID,
-		createAnthropicStreamOverlay(anthropic) as unknown as ProviderConfig,
+		createAnthropicStreamOverlay(anthropic, deviceIdentity) as unknown as ProviderConfig,
 	);
 
 	registerRetryAfterRefusal(pi);

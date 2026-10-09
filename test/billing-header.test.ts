@@ -74,15 +74,66 @@ describe("injectBillingHeader", () => {
 			expect(out.system.some((e) => e.text === LEGACY_IDENTITY)).toBe(false);
 		});
 
-		it("formats the header as cc_version / cc_entrypoint / cch", () => {
+		it("formats the header as cc_version / cc_entrypoint / cch plus prompt and turn stamps", () => {
 			const out = injectBillingHeader(claudePayload()) as {
 				system: { text: string }[];
 			};
 			const header = out.system[0].text;
-			// cch is a placeholder; the wrapped transport resolves it post-serialization.
+			// Field order matches real 2.1.295 first-party traffic. The cch is a
+			// placeholder; the wrapped transport resolves it post-serialization.
 			expect(header).toMatch(
-				/^x-anthropic-billing-header: cc_version=1\.2\.3\.\d{3}; cc_entrypoint=sdk-cli; cch=00000;$/,
+				/^x-anthropic-billing-header: cc_version=1\.2\.3\.\d{3}; cc_entrypoint=sdk-cli; cch=00000; cc_prompt_id=[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}; cc_turn_origin=sdk; cc_prompt_index=\d+; cc_turn_index=\d+;$/,
 			);
+		});
+
+		it("stamps the first prompt of a session as index 0, turn 1", () => {
+			const out = injectBillingHeader(claudePayload(), {
+				sessionId: "turn-shape",
+				device: null,
+			}) as { system: { text: string }[] };
+			expect(out.system[0].text).toContain("cc_prompt_index=0;");
+			expect(out.system[0].text).toContain("cc_turn_index=1;");
+		});
+
+		it("advances the turn within one prompt and starts a new one per user message", () => {
+			const ctx = { sessionId: "turn-tracking", device: null };
+			const first = injectBillingHeader(claudePayload(), ctx) as {
+				system: { text: string }[];
+			};
+			// Tool-result continuation: same prompt, next turn.
+			const continuation = injectBillingHeader(
+				claudePayload({
+					messages: [
+						{ role: "user", content: [{ type: "text", text: "Say hello." }] },
+					{ role: "assistant", content: [{ type: "text", text: "Hi." }] },
+					{
+						role: "user",
+						content: [{ type: "tool_result", tool_use_id: "t1" }],
+					},
+					],
+				}),
+				ctx,
+			) as { system: { text: string }[] };
+			// A new user text prompt: prompt index advances, prompt id changes.
+			const second = injectBillingHeader(
+				claudePayload({
+					messages: [
+					{ role: "user", content: [{ type: "text", text: "Say hello." }] },
+					{ role: "assistant", content: [{ type: "text", text: "Hi." }] },
+					{ role: "user", content: [{ type: "text", text: "Now goodbye." }] },
+				],
+				}),
+				ctx,
+			) as { system: { text: string }[] };
+
+			const idOf = (t: { text: string }) =>
+				t.text.match(/cc_prompt_id=([0-9a-f-]{36});/)?.[1];
+			expect(first.system[0].text).toContain("cc_prompt_index=0;");
+			expect(continuation.system[0].text).toContain("cc_turn_index=2;");
+			expect(idOf(continuation.system[0])).toBe(idOf(first.system[0]));
+			expect(second.system[0].text).toContain("cc_prompt_index=1;");
+			expect(second.system[0].text).toContain("cc_turn_index=1;");
+			expect(idOf(second.system[0])).not.toBe(idOf(first.system[0]));
 		});
 
 		it("relocates third-party system text into the first user message (array content)", () => {
@@ -176,6 +227,38 @@ describe("injectBillingHeader", () => {
 				text: "Stable Pi system prompt.",
 				cache_control: oneHour,
 			});
+		});
+	});
+
+	describe("metadata.user_id device fingerprint", () => {
+		it("adds the device identity with the session id, real-CC key order", () => {
+			const out = injectBillingHeader(claudePayload(), {
+				sessionId: "sess-1",
+				device: { deviceId: "ab".repeat(32), accountUuid: "" },
+			}) as { metadata?: { user_id?: string } };
+			expect(out.metadata?.user_id).toBe(
+				JSON.stringify({
+					device_id: "ab".repeat(32),
+					account_uuid: "",
+					session_id: "sess-1",
+			}),
+			);
+		});
+
+		it("sends no metadata without a device identity", () => {
+			const out = injectBillingHeader(claudePayload(), {
+				device: null,
+			}) as { metadata?: unknown };
+			expect(out.metadata).toBeUndefined();
+		});
+
+		it("merges into existing payload metadata instead of replacing it", () => {
+			const out = injectBillingHeader(
+				claudePayload({ metadata: { trace: "keep" } }),
+				{ device: { deviceId: "cd".repeat(32), accountUuid: "u-1" } },
+			) as { metadata?: Record<string, string> };
+			expect(out.metadata?.trace).toBe("keep");
+			expect(out.metadata?.user_id).toContain('"account_uuid":"u-1"');
 		});
 	});
 });

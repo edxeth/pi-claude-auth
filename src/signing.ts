@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { CCH_PLACEHOLDER } from "./cch.ts";
+import { TURN_ORIGIN, type TurnStamp } from "./turn.ts";
 
 // Salt used in Claude Code's cc_version prompt fingerprint:
 // sha256("59cf53e54c78" + chars[4,7,20] of first user text + semver)[:3].
@@ -15,7 +16,7 @@ const BILLING_SALT = "59cf53e54c78";
 // validation to route the request to the Claude Pro/Max plan instead of
 // pay-as-you-go / extra usage.
 // Overridable via ANTHROPIC_CLI_VERSION.
-export const FALLBACK_CC_VERSION = "2.1.198";
+export const FALLBACK_CC_VERSION = "2.1.295";
 
 let activeCliVersion = FALLBACK_CC_VERSION;
 
@@ -97,7 +98,10 @@ function computeVersionSuffix(messageText: string, version: string): string {
 
 /**
  * Build the complete billing header string for insertion into system[0].
- * Format: x-anthropic-billing-header: cc_version=V.S; cc_entrypoint=E; cch=00000;
+ * Format (field order and turn semantics verified against real 2.1.295
+ * first-party traffic):
+ * x-anthropic-billing-header: cc_version=V.S; cc_entrypoint=E; cch=00000;
+ *   cc_prompt_id=<uuid>; cc_turn_origin=sdk; cc_prompt_index=N; cc_turn_index=N;
  *
  * The `cch` is written as a placeholder. The wrapped transport (cch.ts) owns the
  * final serialized body and replaces it with the real 5-hex XXH64 digest of the
@@ -108,6 +112,7 @@ export function buildBillingHeaderValue(
 	messages: Message[],
 	version: string,
 	entrypoint: string,
+	turn: TurnStamp,
 ): string {
 	const text = extractFirstUserMessageText(messages);
 	const suffix = computeVersionSuffix(text, version);
@@ -115,6 +120,10 @@ export function buildBillingHeaderValue(
 		`x-anthropic-billing-header: ` +
 		`cc_version=${version}.${suffix}; ` +
 		`cc_entrypoint=${entrypoint}; ` +
-		`${CCH_PLACEHOLDER};`
+		`${CCH_PLACEHOLDER}; ` +
+		`cc_prompt_id=${turn.promptId}; ` +
+		`cc_turn_origin=${TURN_ORIGIN}; ` +
+		`cc_prompt_index=${turn.promptIndex}; ` +
+		`cc_turn_index=${turn.turnIndex};`
 	);
 }

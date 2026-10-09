@@ -126,7 +126,24 @@ describe("billing -> cch end-to-end pipeline", () => {
 		const patched = JSON.parse(patchClaudeCodeCch(JSON.stringify(injected))) as {
 			system: { text: string }[];
 		};
-		expect(patched.system[0].text).toMatch(/cch=[0-9a-f]{5};$/u);
+		// The digest now sits mid-block: prompt/turn fields follow cch.
+		expect(patched.system[0].text).toMatch(/cch=[0-9a-f]{5}; cc_prompt_id=/u);
 		expect(patched.system[0].text).not.toContain("cch=00000");
+	});
+
+	it("passes a real-CC-shaped billing block (resolved cch, trailing fields) through unchanged", () => {
+		// Shape recovered from live 2.1.295 first-party traffic: the cch digest
+		// is mid-block and prompt/turn fields follow it.
+		const real =
+			"x-anthropic-billing-header: cc_version=2.1.295.cf5; cc_entrypoint=sdk-cli; cch=fa0a2; cc_prompt_id=631fca7c-d9fd-456c-b19e-21516a3fc319; cc_turn_origin=sdk; cc_prompt_index=0; cc_turn_index=1;";
+		const body = JSON.stringify({
+			model: "claude-haiku-4-5",
+			max_tokens: 128,
+			system: [{ type: "text", text: real }],
+			messages: [
+				{ role: "user", content: [{ type: "text", text: "Say hi." }] },
+			],
+		});
+		expect(patchClaudeCodeCch(body)).toBe(body);
 	});
 });
