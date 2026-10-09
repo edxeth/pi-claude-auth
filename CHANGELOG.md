@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-10-09
+
 ### New Features
 
 - **Current Claude Code fingerprint (2.1.295)**: Subscription (OAuth) requests now carry the same request fingerprint as real, current Claude Code — prompt/turn stamps in the billing header, matching transport headers, and the machine's device identity in the request body — reducing the risk of rejection or extra-usage billing. See [How it works](README.md#how-it-works).
