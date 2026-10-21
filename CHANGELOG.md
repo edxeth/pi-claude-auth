@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Fixed
+
+#### Mid-reply model switches now offer the refusal menu
+Refs: `013c712`
+
+Fixed Fable 5 and Opus 5 turns that ended with `Anthropic performed an unsupported mid-output model fallback` and no way to recover. This happens when Anthropic's safety classifier declines a reply that has already started and a fallback model was requested, for example by a proxy such as CLIProxyAPI in cloak mode. Pi rejects the model switch and ends the turn.
+
+That error now opens the same menu as other classifier refusals, titled, for example, "Claude Opus 5.5's safeguards flagged this response mid-reply.": continue with Claude Opus 4.8, or edit and retry. `PI_CLAUDE_AUTH_REFUSAL_MODE=auto` continues with Opus 4.8 without asking. Other errors that mention a fallback still pass straight through.
+
 ## [1.3.0] - 2026-10-09
 
 ### New Features

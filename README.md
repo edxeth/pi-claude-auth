@@ -57,6 +57,8 @@ Instead of leaving you with a dead turn, this extension pauses and offers two wa
 
 Press Escape to take neither and keep the refusal.
 
+The same menu appears when Anthropic switches models in the middle of a reply and Pi ends the turn with `Anthropic performed an unsupported mid-output model fallback`. Anthropic does that only after its safety classifier declines the reply, and only when a fallback model was requested, for example by a proxy such as CLIProxyAPI.
+
 Only the Fable 5 and Opus 5 families count, matched on the model ID prefix (`claude-fable-5*`, `claude-opus-5*`). Network timeouts, proxy errors, and other models pass straight through, and the Opus 4.8 continuation cannot set the whole thing off again.
 
 Set `PI_CLAUDE_AUTH_REFUSAL_MODE=auto` to skip the question and always continue with Opus 4.8. Outside an interactive terminal (`-p`, JSON output) you get a message saying the turn was refused, and nothing else happens.
