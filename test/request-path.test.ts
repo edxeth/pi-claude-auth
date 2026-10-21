@@ -8,7 +8,16 @@ import {
 	type ProviderConfig,
 	ModelRuntime,
 } from "@earendil-works/pi-coding-agent";
-import loadExtension from "../src/index.ts";
+import type { DeviceIdentity } from "../src/device-id.ts";
+import { createClaudeAuthExtension } from "../src/index.ts";
+
+// A fixed identity keeps the request shape independent of whether the machine
+// running the tests has Claude Code installed or signed in.
+const FIXTURE_IDENTITY: DeviceIdentity = {
+	deviceId: "d".repeat(64),
+	accountUuid: "00000000-0000-4000-8000-000000000001",
+};
+const loadExtension = createClaudeAuthExtension(async () => FIXTURE_IDENTITY);
 
 /**
  * Request-behavior regression tests through the real composition layer: after
@@ -157,13 +166,13 @@ describe("request behavior under the registered overlay", () => {
 		const bodyPromptId = request.body.match(/cc_prompt_id=([0-9a-f-]{36});/)?.[1];
 		expect(request.headers.get("x-claude-code-prompt-id")).toBe(bodyPromptId);
 		expect(request.headers.get("x-claude-code-request-class")).toBe("main");
-		// metadata.user_id is attached and well-formed (device_id source mapping
-		// is covered by device-id/transform unit tests; homedir is not pinnable
-		// here), and the session id matches the transport session header.
+		// metadata.user_id carries the injected identity (the ~/.claude.json
+		// mapping is covered by the device-id unit tests), and the session id
+		// matches the transport session header.
 		const metadata = JSON.parse(request.body).metadata as { user_id: string };
 		expect(JSON.parse(metadata.user_id)).toMatchObject({
-			device_id: expect.stringMatching(/^[0-9a-f]{64}$/),
-			account_uuid: "",
+			device_id: FIXTURE_IDENTITY.deviceId,
+			account_uuid: FIXTURE_IDENTITY.accountUuid,
 			session_id: "req-path-stamps",
 		});
 		expect(request.headers.get("x-claude-code-session-id")).toBe(

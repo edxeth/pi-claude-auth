@@ -13,7 +13,7 @@ import { initLogger, log } from "./logger.ts";
 import { registerRetryAfterRefusal } from "./retry-refusal.ts";
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 import { createAnthropicStreamOverlay } from "./anthropic-provider.ts";
-import { loadClaudeCodeIdentity } from "./device-id.ts";
+import { type DeviceIdentity, loadClaudeCodeIdentity } from "./device-id.ts";
 import { FALLBACK_CC_VERSION } from "./signing.ts";
 
 const PROVIDER_ID = "anthropic";
@@ -84,56 +84,66 @@ function showVersionAlert(
  * replacement provider: pi then keeps its catalog-enabled built-in Anthropic
  * provider as the base, so the refreshed pi.dev catalog (new models such as
  * `claude-sonnet-5-5`) and the OAuth lifecycle survive extension loading.
+ *
+ * The identity loader is a parameter so tests can pass a fixture: bun's
+ * os.homedir() ignores a runtime-set HOME, so the real ~/.claude.json cannot
+ * be redirected from a test.
  */
-const extension = async (pi: ExtensionAPI): Promise<void> => {
-	initLogger();
-	const versionResolution = await initializeClaudeCodeVersion();
-	// Startup-only reads: the newest Claude Code release and the machine's
-	// ~/.claude.json identity. A missing identity file is normal (never ran real
-	// Claude Code here) and only means metadata.user_id is omitted.
-	const deviceIdentity = await loadClaudeCodeIdentity();
-	log("device_identity", { found: deviceIdentity !== null });
+export function createClaudeAuthExtension(
+	loadIdentity: () => Promise<DeviceIdentity | null> = loadClaudeCodeIdentity,
+): (pi: ExtensionAPI) => Promise<void> {
+	return async (pi) => {
+		initLogger();
+		const versionResolution = await initializeClaudeCodeVersion();
+		// Startup-only reads: the newest Claude Code release and the machine's
+		// ~/.claude.json identity. A missing identity file is normal (never ran real
+		// Claude Code here) and only means metadata.user_id is omitted.
+		const deviceIdentity = await loadIdentity();
+		log("device_identity", { found: deviceIdentity !== null });
 
-	// Register a named stream overlay on pi's built-in anthropic provider
-	// (preserving its model catalog and OAuth lifecycle) so OAuth requests carry
-	// the Claude Code billing header, identity headers, and a real cch body
-	// checksum. No `models`, `baseUrl`, or `oauth` field is registered: the
-	// built-in provider stays the base for model listing/refresh and `/login
-	// anthropic` keeps doing the real browser flow and writing auth.json.
-	const anthropic = builtinProviders().find(
-		(provider) => provider.id === PROVIDER_ID,
-	);
-	if (!anthropic)
-		throw new Error(
-			"pi-claude-auth could not load pi's built-in Anthropic provider",
+		// Register a named stream overlay on pi's built-in anthropic provider
+		// (preserving its model catalog and OAuth lifecycle) so OAuth requests carry
+		// the Claude Code billing header, identity headers, and a real cch body
+		// checksum. No `models`, `baseUrl`, or `oauth` field is registered: the
+		// built-in provider stays the base for model listing/refresh and `/login
+		// anthropic` keeps doing the real browser flow and writing auth.json.
+		const anthropic = builtinProviders().find(
+			(provider) => provider.id === PROVIDER_ID,
 		);
-	// The cast is a type-identity artifact, not a contract change: bun nests a
-	// second pi-ai copy under pi-agent-core, so the two AssistantMessageEventStream
-	// declarations never unify structurally. At runtime the overlay is plain data
-	// (api string + function) and satisfies ProviderConfig.
-	pi.registerProvider(
-		PROVIDER_ID,
-		createAnthropicStreamOverlay(anthropic, deviceIdentity) as unknown as ProviderConfig,
-	);
+		if (!anthropic)
+			throw new Error(
+				"pi-claude-auth could not load pi's built-in Anthropic provider",
+			);
+		// The cast is a type-identity artifact, not a contract change: bun nests a
+		// second pi-ai copy under pi-agent-core, so the two AssistantMessageEventStream
+		// declarations never unify structurally. At runtime the overlay is plain data
+		// (api string + function) and satisfies ProviderConfig.
+		pi.registerProvider(
+			PROVIDER_ID,
+			createAnthropicStreamOverlay(anthropic, deviceIdentity) as unknown as ProviderConfig,
+		);
 
-	registerRetryAfterRefusal(pi);
+		registerRetryAfterRefusal(pi);
 
-	// Surface a degraded-version alert on startup (offline resolutions stay
-	// silent). No credential work here: pi already loaded auth.json and prefers
-	// the OAuth token over ANTHROPIC_API_KEY.
-	pi.on("session_start", (event, ctx) => {
-		if (event.reason !== "startup") return;
-		showVersionAlert(ctx, versionResolution);
-		// Long-lived sessions refresh the cached version in the background.
-		// Headless (print) runs serve the cache as-is: a pending fetch would
-		// hold the process open at exit and tax every subagent child.
-		if (ctx.mode === "tui" && versionResolution.status === "cache") {
-			void revalidateClaudeCodeVersion();
-		}
-	});
+		// Surface a degraded-version alert on startup (offline resolutions stay
+		// silent). No credential work here: pi already loaded auth.json and prefers
+		// the OAuth token over ANTHROPIC_API_KEY.
+		pi.on("session_start", (event, ctx) => {
+			if (event.reason !== "startup") return;
+			showVersionAlert(ctx, versionResolution);
+			// Long-lived sessions refresh the cached version in the background.
+			// Headless (print) runs serve the cache as-is: a pending fetch would
+			// hold the process open at exit and tax every subagent child.
+			if (ctx.mode === "tui" && versionResolution.status === "cache") {
+				void revalidateClaudeCodeVersion();
+			}
+		});
 
-	log("provider_registered", { provider: PROVIDER_ID });
-};
+		log("provider_registered", { provider: PROVIDER_ID });
+	};
+}
+
+const extension = createClaudeAuthExtension();
 
 export const ClaudeAuthExtension = extension;
 export default extension;
