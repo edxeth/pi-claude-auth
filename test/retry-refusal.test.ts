@@ -93,6 +93,11 @@ const fableRefusal = {
 	errorMessage: "The request was blocked by a safety classifier",
 } as const;
 
+// The exact error pi-ai throws when an Anthropic fallback block arrives after
+// output has started (pi-ai dist/api/anthropic-messages.js).
+const MID_OUTPUT_FALLBACK_ERROR =
+	"Anthropic performed an unsupported mid-output model fallback";
+
 interface HarnessOptions {
 	action?: "continue" | "edit";
 	mode?: "tui" | "rpc" | "json" | "print";
@@ -120,6 +125,7 @@ function createHarness(options: HarnessOptions = {}) {
 	const sentUserMessages: Array<{ text: string; options: unknown }> = [];
 	const navigateTreeCalls: Array<{ targetId: string }> = [];
 	const dispatches: Promise<unknown>[] = [];
+	const menuTitles: string[] = [];
 	let menuCalls = 0;
 	let editorText = options.editorDraft ?? "";
 	let idleGateOpen = true;
@@ -219,8 +225,9 @@ function createHarness(options: HarnessOptions = {}) {
 			getEditorText() {
 				return editorText;
 			},
-			async select(_title: string, choices: string[]) {
+			async select(title: string, choices: string[]) {
 				menuCalls++;
+				menuTitles.push(title);
 				if (options.action === "continue") return choices[0];
 				if (options.action === "edit") return choices[1];
 				return undefined;
@@ -298,15 +305,17 @@ function createHarness(options: HarnessOptions = {}) {
 			return menuCalls;
 		},
 		handlers,
+		menuTitles,
 		notifications,
 		/**
 		 * Persist the refusal like Pi does, then fire agent_end carrying the same
 		 * message object Pi stored. `beforeHandlers` simulates another extension
 		 * appending an entry — and moving the leaf — ahead of this one.
 		 */
-		async refuse(beforeHandlers?: () => void) {
+		async refuse(beforeHandlers?: () => void, errorMessage?: string) {
 			const refusal = {
 				...fableRefusal,
+				...(errorMessage === undefined ? {} : { errorMessage }),
 				content: [],
 				api: "anthropic-messages",
 				usage: ZERO_USAGE,
@@ -371,6 +380,33 @@ describe("refusal detection", () => {
 				errorMessage: "The model refused to complete the request",
 			}),
 		).toBe(true);
+	});
+
+	it("handles pi's mid-output model fallback error from Opus 5-family models", () => {
+		expect(
+			shouldHandleRefusal({
+				...fableRefusal,
+				model: "claude-opus-5-5",
+				errorMessage: MID_OUTPUT_FALLBACK_ERROR,
+			}),
+		).toBe(true);
+		expect(
+			shouldHandleRefusal({
+				...fableRefusal,
+				model: "claude-sonnet-5-5",
+				errorMessage: MID_OUTPUT_FALLBACK_ERROR,
+			}),
+		).toBe(false);
+	});
+
+	it("does not treat other errors that mention a fallback as a model switch", () => {
+		for (const errorMessage of [
+			"No cached version — using fallback 2.1.295 which may be stale",
+			"Anthropic stream ended without a stop reason",
+			"model fallback",
+		]) {
+			expect(shouldHandleRefusal({ ...fableRefusal, errorMessage })).toBe(false);
+		}
 	});
 
 	it("does not handle other model families or unrelated errors", () => {
@@ -503,6 +539,24 @@ describe("interactive refusal handling", () => {
 				},
 				options: { deliverAs: "followUp", triggerTurn: true },
 			},
+		]);
+	});
+
+	it("describes a mid-output fallback as a mid-reply safeguards flag and continues with Opus 4.8", async () => {
+		const harness = createHarness({ action: "continue" });
+		await harness.refuse(undefined, MID_OUTPUT_FALLBACK_ERROR);
+		expect(harness.menuTitles).toEqual([
+			"Claude Fable 5's safeguards flagged this response mid-reply.",
+		]);
+		expect(harness.selectedModels).toEqual([harness.fallbackModel]);
+		expect(harness.sentMessages).toHaveLength(1);
+	});
+
+	it("keeps the safeguards wording for classifier refusals", async () => {
+		const harness = createHarness({ action: "continue" });
+		await harness.refuse();
+		expect(harness.menuTitles).toEqual([
+			"Claude Fable 5's safeguards flagged this response.",
 		]);
 	});
 
@@ -1106,6 +1160,19 @@ describe("automatic and non-interactive handling", () => {
 			{
 				message:
 					"Claude Fable 5 returned an Anthropic classifier refusal. Interactive refusal handling requires an interactive UI.",
+				kind: "error",
+			},
+		]);
+	});
+
+	it("names a mid-output fallback correctly without an interactive UI", async () => {
+		const harness = createHarness({ mode: "print" });
+		await harness.refuse(undefined, MID_OUTPUT_FALLBACK_ERROR);
+		expect(harness.sentMessages).toEqual([]);
+		expect(harness.notifications).toEqual([
+			{
+				message:
+					"Claude Fable 5's safeguards flagged this response mid-reply. Interactive refusal handling requires an interactive UI.",
 				kind: "error",
 			},
 		]);

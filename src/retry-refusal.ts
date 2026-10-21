@@ -11,6 +11,21 @@ const BRANCH_ENTRY_TYPE = "claude-refusal-branch";
 const REWIND_COMMAND = "claude-refusal-rewind";
 const MIN_PI_VERSION_FOR_DISPATCH = "0.84.2";
 
+/**
+ * The exact error pi-ai throws when an Anthropic server-side fallback starts
+ * after output has begun. A proxy such as CLIProxyAPI in cloak mode can request
+ * fallbacks that pi itself does not request. Anthropic documents that only a
+ * safety classifier decline triggers a fallback, so this error is a refusal,
+ * although pi discards the fallback block and its trigger category and keeps
+ * only this text. The observed fallback target was `claude-opus-4-8`, the same
+ * model this extension switches to.
+ */
+const MID_OUTPUT_FALLBACK_ERROR =
+	"Anthropic performed an unsupported mid-output model fallback";
+
+/** How a Fable 5 / Opus 5 classifier refusal reached pi. */
+type Interruption = "refusal" | "midOutputFallback";
+
 interface AssistantRefusalCandidate {
 	role?: unknown;
 	provider?: unknown;
@@ -43,16 +58,37 @@ function isRefusalError(message: unknown): boolean {
 	);
 }
 
+function classifyInterruption(
+	message: AssistantRefusalCandidate,
+): Interruption | undefined {
+	if (
+		message.role !== "assistant" ||
+		message.provider !== "anthropic" ||
+		!isAnthropicFableOrOpus5(message.model) ||
+		message.stopReason !== "error"
+	) {
+		return undefined;
+	}
+	if (message.errorMessage === MID_OUTPUT_FALLBACK_ERROR)
+		return "midOutputFallback";
+	if (isRefusalError(message.errorMessage)) return "refusal";
+	return undefined;
+}
+
 export function shouldHandleRefusal(
 	message: AssistantRefusalCandidate,
 ): boolean {
-	return (
-		message.role === "assistant" &&
-		message.provider === "anthropic" &&
-		isAnthropicFableOrOpus5(message.model) &&
-		message.stopReason === "error" &&
-		isRefusalError(message.errorMessage)
-	);
+	return classifyInterruption(message) !== undefined;
+}
+
+/** One sentence naming what happened, used in the menu and in notifications. */
+function describeInterruption(
+	interruption: Interruption,
+	refusedModelName: string,
+): string {
+	return interruption === "midOutputFallback"
+		? `${refusedModelName}'s safeguards flagged this response mid-reply.`
+		: `${refusedModelName}'s safeguards flagged this response.`;
 }
 
 export function getRefusalMode(): "ask" | "auto" {
@@ -161,6 +197,7 @@ function hasRefusalBranchMarker(
  */
 async function chooseRefusalAction(
 	ctx: ExtensionContext,
+	title: string,
 	refusedModelName: string,
 	fallbackModelName: string,
 	canEdit: boolean,
@@ -168,7 +205,7 @@ async function chooseRefusalAction(
 	const continueLabel = `Continue with ${fallbackModelName}`;
 	const editLabel = `Edit and retry with ${refusedModelName}`;
 	const choice = await ctx.ui.select(
-		`${refusedModelName}'s safeguards flagged this response.`,
+		title,
 		canEdit ? [continueLabel, editLabel] : [continueLabel],
 	);
 	if (choice === continueLabel) return "continue";
@@ -346,7 +383,8 @@ export function registerRetryAfterRefusal(
 	// That persistence is what gives Edit a session entry to rewind from.
 	pi.on("agent_end", async (event, ctx) => {
 		const message = lastAssistantMessage(event.messages);
-		if (!message || !shouldHandleRefusal(message)) return;
+		const interruption = message ? classifyInterruption(message) : undefined;
+		if (!message || !interruption) return;
 
 		const refusedModelName = displayModelName(ctx, "anthropic", message.model);
 		if (getRefusalMode() === "auto") {
@@ -356,7 +394,9 @@ export function registerRetryAfterRefusal(
 
 		if (!ctx.hasUI) {
 			ctx.ui.notify(
-				`${refusedModelName} returned an Anthropic classifier refusal. Interactive refusal handling requires an interactive UI.`,
+				interruption === "midOutputFallback"
+					? `${describeInterruption(interruption, refusedModelName)} Interactive refusal handling requires an interactive UI.`
+					: `${refusedModelName} returned an Anthropic classifier refusal. Interactive refusal handling requires an interactive UI.`,
 				"error",
 			);
 			return;
@@ -370,6 +410,7 @@ export function registerRetryAfterRefusal(
 
 		const action = await chooseRefusalAction(
 			ctx,
+			describeInterruption(interruption, refusedModelName),
 			refusedModelName,
 			displayModelName(ctx, "anthropic", OPUS_FALLBACK_MODEL_ID),
 			triggerId !== null,
