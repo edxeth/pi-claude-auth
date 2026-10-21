@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [1.3.1] - 2026-10-21
+
 ### Fixed
 
 #### Mid-reply model switches now offer the refusal menu
