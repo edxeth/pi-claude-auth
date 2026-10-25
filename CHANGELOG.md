@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Requires Pi 1.1.0 or newer. Upgrade Pi before updating this extension.
+
+### Fixed
+
+- Fixed historical Claude thinking blocks being dropped after Edit and retry and after `/reload` on a rewound session. Requests now preserve the retained conversation prefix.
+
 ## [1.3.1] - 2026-10-21
 
 ### Fixed

@@ -178,17 +178,6 @@ export function computeBranchTarget(
 	return current.parentId;
 }
 
-function hasRefusalBranchMarker(
-	sessionManager: ExtensionContext["sessionManager"],
-): boolean {
-	return sessionManager
-		.getBranch()
-		.some(
-			(entry) =>
-				entry.type === "custom" && entry.customType === BRANCH_ENTRY_TYPE,
-		);
-}
-
 /**
  * navigateTree() moves the leaf *before* user and custom messages and lifts
  * their text into the editor (pi's "edit that prompt" semantics). The refusal
@@ -246,7 +235,6 @@ export function registerRetryAfterRefusal(
 	pi: ExtensionAPI,
 	options: { piVersion?: string } = {},
 ): void {
-	let needsContextRebuild = false;
 	const dispatchSupported = supportsCommandDispatch(
 		options.piVersion ?? VERSION,
 	);
@@ -254,13 +242,6 @@ export function registerRetryAfterRefusal(
 	// rebuilds the transcript. Set right after the synchronous rewind; consumed
 	// once by the command.
 	let pendingRefreshLeafId: string | undefined;
-
-	// Only an extension reload leaves Pi's agent state behind: every other entry
-	// path rebuilds it from the session branch, which is already the repaired one.
-	pi.on("session_start", (event, ctx) => {
-		needsContextRebuild =
-			event.reason === "reload" && hasRefusalBranchMarker(ctx.sessionManager);
-	});
 
 	async function continueWithFallback(
 		ctx: ExtensionContext,
@@ -299,8 +280,9 @@ export function registerRetryAfterRefusal(
 	}
 
 	// Rewind the session to `targetId` by direct SessionManager mutation and
-	// persist the selection with a hidden marker entry. Returns false when the
-	// leaf move itself failed.
+	// persist the selection with a hidden marker entry. Pi builds every request
+	// from that branch. Replacing context here would duplicate system checkpoints
+	// and invalidate retained thinking signatures. Returns false if the move fails.
 	function rewindDirectly(
 		ctx: ExtensionContext,
 		triggerId: string,
@@ -327,7 +309,6 @@ export function registerRetryAfterRefusal(
 			);
 		}
 
-		needsContextRebuild = true;
 		return true;
 	}
 
@@ -355,8 +336,8 @@ export function registerRetryAfterRefusal(
 					// returns before the awaited session_before_tree hooks, so no
 					// input can interleave and nothing is ever branched over —
 					// while the TUI wrapper still clears and re-renders the
-					// transcript. Agent state stays stale; the context hook
-					// below repairs every provider request.
+					// transcript. Pi projects provider requests from the active
+					// session branch; this command only refreshes the view.
 					await ctx.navigateTree(expectedLeafId);
 				} catch (error) {
 					ctx.ui.notify(
@@ -447,21 +428,4 @@ export function registerRetryAfterRefusal(
 		}
 		ctx.ui.setEditorText(draft);
 	});
-
-	// Safety net: direct branching does not mutate agent.state.messages. Rebuild
-	// every provider context from the active session branch until Pi performs an
-	// operation that synchronizes its own state.
-	pi.on("context", async (_event, ctx) => {
-		if (!needsContextRebuild) return undefined;
-		const sessionContext = (
-			ctx.sessionManager as unknown as SessionManager
-		).buildSessionContext();
-		return { messages: sessionContext.messages };
-	});
-
-	const markContextSynchronized = () => {
-		needsContextRebuild = false;
-	};
-	pi.on("session_tree", markContextSynchronized);
-	pi.on("session_compact", markContextSynchronized);
 }

@@ -17,6 +17,8 @@ Pi handles the login itself. This extension adds the two headers Pi does not sen
 
 ## Install
 
+Requires Pi 1.1.0 or newer. Pi owns request-context reconstruction on these versions.
+
 ```bash
 pi install git:github.com/edxeth/pi-claude-auth
 ```
@@ -65,7 +67,9 @@ Set `PI_CLAUDE_AUTH_REFUSAL_MODE=auto` to skip the question and always continue 
 
 ### Where Edit and retry stops
 
-On Pi 0.84.2 and newer, Edit and retry refreshes the chat automatically when the session is still at the rewind point. If newer input already moved the branch, that input is kept and the view stays as it is; visit `/tree` to refresh it. Older Pi versions keep the previous behavior, where the view stays stale until you visit `/tree`, run `/reload`, or compact the session.
+Edit and retry refreshes the chat automatically when the session is still at the rewind point. If newer input already moved the branch, that input is kept and the view stays as it is. Visit `/tree` to refresh it.
+
+Pi builds each model request from the active session branch. The extension does not replace request history after a rewind. Retained system messages, tool declarations, and signed thinking therefore keep their original order.
 
 The rewind covers the conversation. Files written, commands run, and requests sent during the abandoned turn stay exactly as the model left them.
 

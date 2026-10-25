@@ -672,11 +672,8 @@ describe("interactive refusal handling", () => {
 		);
 		expect(harness.editorValues).toEqual(["change course before tool C"]);
 
-		// The no-op refresh does not synchronize agent state, so the context
-		// repair hook stays armed and repairs provider requests from the branch.
-		const repaired = (await harness.handlers.context[0]({}, harness.ctx)) as {
-			messages: Array<{ role: string }>;
-		};
+		// Pi's canonical branch retains the completed tool work.
+		const repaired = harness.session.buildSessionContext();
 		expect(repaired.messages.map((message) => message.role)).toEqual([
 			"user",
 			"assistant",
@@ -714,43 +711,6 @@ describe("interactive refusal handling", () => {
 			parentId: null,
 			customType: "claude-refusal-branch",
 		});
-	});
-
-	it("rebuilds every later provider context until Pi performs supported tree navigation", async () => {
-		const harness = createHarness({ action: "edit" });
-		await harness.refuse();
-
-		const first = (await harness.handlers.context[0]({}, harness.ctx)) as {
-			messages: Array<{ role: string }>;
-		};
-		expect(first.messages.map((message) => message.role)).toEqual(["user"]);
-
-		appendUser(harness.session, "Try a safer approach");
-		const second = (await harness.handlers.context[0]({}, harness.ctx)) as {
-			messages: Array<{ role: string }>;
-		};
-		expect(second.messages.map((message) => message.role)).toEqual([
-			"user",
-			"user",
-		]);
-
-		await harness.handlers.session_tree[0]({}, harness.ctx);
-		expect(await harness.handlers.context[0]({}, harness.ctx)).toBeUndefined();
-	});
-
-	it("restores context repair after the extension reloads", async () => {
-		const first = createHarness({ action: "edit" });
-		await first.refuse();
-
-		const reloaded = createHarness({
-			session: first.session,
-			initializeSession: false,
-		});
-		await reloaded.handlers.session_start[0]({ reason: "reload" }, reloaded.ctx);
-		const context = (await reloaded.handlers.context[0]({}, reloaded.ctx)) as {
-			messages: Array<{ role: string }>;
-		};
-		expect(context.messages.map((message) => message.role)).toEqual(["user"]);
 	});
 
 	it("reopens on the selected branch instead of the abandoned refusal", async () => {
@@ -843,11 +803,8 @@ describe("dispatched rewind (pi >= 0.84.2)", () => {
 				.buildSessionContext()
 				.messages.map((message) => message.role),
 		).toEqual(["user", "assistant", "toolResult"]);
-		// The no-op refresh does not synchronize agent state, so the context
-		// repair hook stays armed and keeps provider requests on the branch.
-		const repaired = (await harness.handlers.context[0]({}, harness.ctx)) as {
-			messages: Array<{ role: string }>;
-		};
+		// The view refresh does not change the branch used for provider requests.
+		const repaired = harness.session.buildSessionContext();
 		expect(repaired.messages.map((message) => message.role)).toEqual([
 			"user",
 			"assistant",
@@ -934,10 +891,8 @@ describe("dispatched rewind (pi >= 0.84.2)", () => {
 			type: "custom",
 			customType: "claude-refusal-branch",
 		});
-		// The repair hook stays active because no supported navigation ran.
-		const context = (await harness.handlers.context[0]({}, harness.ctx)) as {
-			messages: Array<{ role: string }>;
-		};
+		// The retained branch remains intact after the no-op navigation.
+		const context = harness.session.buildSessionContext();
 		expect(context.messages.map((message) => message.role)).toEqual([
 			"user",
 			"assistant",
@@ -957,7 +912,7 @@ describe("dispatched rewind (pi >= 0.84.2)", () => {
 		expect(harness.commands).toEqual({});
 		expect(harness.sentUserMessages).toEqual([]);
 		expect(harness.navigateTreeCalls).toEqual([]);
-		// Direct rewind exactly as before: same branch, marker, and repair hook.
+		// A disabled command dispatch still preserves the branch and marker.
 		expect(
 			harness.session.buildSessionContext().messages.map((message) => message.role),
 		).toEqual(["user"]);
@@ -965,16 +920,13 @@ describe("dispatched rewind (pi >= 0.84.2)", () => {
 			type: "custom",
 			customType: "claude-refusal-branch",
 		});
-		const context = (await harness.handlers.context[0]({}, harness.ctx)) as {
-			messages: Array<{ role: string }>;
-		};
+		const context = harness.session.buildSessionContext();
 		expect(context.messages.map((message) => message.role)).toEqual(["user"]);
 	});
 
 	it("rewinds without dispatching a refresh outside the TUI (rpc)", async () => {
 		// RPC has a remote UI, so the menu opens, but there is no TUI
-		// transcript to rebuild: the rewind and context repair must work
-		// without dispatching anything.
+		// transcript to rebuild: the rewind must work without dispatching anything.
 		const harness = createHarness({ action: "edit", mode: "rpc" });
 
 		await harness.refuse();
@@ -989,9 +941,7 @@ describe("dispatched rewind (pi >= 0.84.2)", () => {
 			type: "custom",
 			customType: "claude-refusal-branch",
 		});
-		const context = (await harness.handlers.context[0]({}, harness.ctx)) as {
-			messages: Array<{ role: string }>;
-		};
+		const context = harness.session.buildSessionContext();
 		expect(context.messages.map((message) => message.role)).toEqual(["user"]);
 	});
 
@@ -1037,10 +987,8 @@ describe("dispatched rewind (pi >= 0.84.2)", () => {
 			"toolResult",
 			"user", // the queued prompt, still on the repaired branch
 		]);
-		// The context repair hook stays armed because no supported navigation ran.
-		const context = (await harness.handlers.context[0]({}, harness.ctx)) as {
-			messages: Array<{ role: string }>;
-		};
+		// Queued input belongs to the active branch used for provider requests.
+		const context = harness.session.buildSessionContext();
 		expect(context.messages.map((message) => message.role)).toEqual([
 			"user",
 			"assistant",
@@ -1108,9 +1056,7 @@ describe("dispatched rewind (pi >= 0.84.2)", () => {
 				.buildSessionContext()
 				.messages.map((message) => message.role),
 		).toEqual(["user", "assistant", "toolResult"]);
-		const context = (await harness.handlers.context[0]({}, harness.ctx)) as {
-			messages: Array<{ role: string }>;
-		};
+		const context = harness.session.buildSessionContext();
 		expect(context.messages.map((message) => message.role)).toEqual([
 			"user",
 			"assistant",
