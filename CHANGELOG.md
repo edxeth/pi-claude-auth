@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-10-30
+
 ### Breaking Changes
 
 - Requires Pi 1.1.0 or newer. Upgrade Pi before updating this extension.
