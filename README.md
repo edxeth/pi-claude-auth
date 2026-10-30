@@ -4,7 +4,7 @@
 
 When Pi calls Anthropic with an OAuth token, Anthropic treats it as third-party harness traffic. It routes those requests through a separate "extra usage" bucket and bills them per token, outside your plan window. This extension sends the Claude Code billing header and identity, so Anthropic sees the request as Claude Code traffic and draws it from your plan quota.
 
-Pi handles the login itself. This extension adds the two headers Pi does not send, and it steps in when Claude refuses a request. It stays out of your credentials: `/login` keeps working the way it always has.
+Pi handles the login itself. This extension adds the two headers Pi does not send, helps Pi recognize transient Anthropic transport failures, and steps in when Claude refuses a request. It stays out of your credentials: `/login` keeps working the way it always has.
 
 ## 🌐 **Join the Community**
 
@@ -61,7 +61,7 @@ Press Escape to take neither and keep the refusal.
 
 The same menu appears when Anthropic switches models in the middle of a reply and Pi ends the turn with `Anthropic performed an unsupported mid-output model fallback`. Anthropic does that only after its safety classifier declines the reply, and only when a fallback model was requested, for example by a proxy such as CLIProxyAPI.
 
-Only the Fable 5 and Opus 5 families count, matched on the model ID prefix (`claude-fable-5*`, `claude-opus-5*`). Network timeouts, proxy errors, and other models pass straight through, and the Opus 4.8 continuation cannot set the whole thing off again.
+Only the Fable 5 and Opus 5 families count, matched on the model ID prefix (`claude-fable-5*`, `claude-opus-5*`). This refusal workflow ignores network timeouts, proxy errors, and other models, and the Opus 4.8 continuation cannot set it off again. Transport-error handling is separate, as described below.
 
 Set `PI_CLAUDE_AUTH_REFUSAL_MODE=auto` to skip the question and always continue with Opus 4.8. Outside an interactive terminal (`-p`, JSON output) you get a message saying the turn was refused, and nothing else happens.
 
@@ -76,6 +76,56 @@ The rewind covers the conversation. Files written, commands run, and requests se
 Anything you typed while the refusal was landing still runs after the rewind. Pi gives extensions no way to clear that queue.
 
 The extension steps in once the refusal has fully arrived. A stream that hangs instead never gets that far, and you are back to aborting the turn yourself.
+
+## Transport failures
+
+The extension helps Pi's native retry mechanism recognize these Anthropic errors:
+
+- `connection reset by peer`, including Go's `read tcp …: read: connection reset by peer`
+- `ECONNRESET` and `read ECONNRESET`
+- `unexpected EOF`
+
+It accepts a complete matching transport diagnostic, either as plain error text or
+inside an Anthropic `api_error` envelope. Other error types, malformed envelopes,
+and messages that only quote those phrases remain unchanged.
+
+This applies to the built-in `anthropic` provider using `anthropic-messages`,
+with OAuth or an API key. **CLIProxyAPI is not required.** Direct connections and
+other compatible proxies work the same way. Other providers, including GPT, are
+not changed.
+
+Before Pi decides whether to retry, the extension prefixes the error with
+`connection error:` and preserves the original diagnostic, content, and failed
+status. Pi then owns the retry, backoff, cancellation, and context handling.
+The extension sends no new user message, changes no model, and runs no retry loop.
+
+Pi's `retry.enabled` and `retry.maxRetries` settings still apply. Disabling retries
+prevents recovery; exhausting the budget leaves a failed turn. Cancellation,
+authentication errors, refusals, and quota errors are not converted into retries.
+This does not repair the network, resume an already stopped turn, or detect a
+stream that hangs without reporting an error.
+
+The handler requires Pi's `message_end` replacement contract. Keep the CLI
+integration tests green after Pi upgrades. In JSON mode, inspect the final
+assistant `stopReason`: a zero process exit code does not establish success.
+
+## Development checks
+
+Run `bun test` for the suite. The transport integration tests require `pi` on
+`PATH` and run that CLI against a loopback-only Anthropic fixture. They use an
+isolated configuration, synthetic credentials, no personal context files, and no
+paid model calls.
+
+Focused checks:
+
+```bash
+bun test test/transport-errors.test.ts
+bun test test/transport-retry-cli.test.ts
+```
+
+These cover native recovery without new prompts, retry limits, disabled retries,
+cancellation, preserved tool results, and an interrupted tool call that must not
+execute.
 
 ## Environment variables
 

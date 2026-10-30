@@ -11,6 +11,7 @@ import {
 } from "./claude-version.ts";
 import { initLogger, log } from "./logger.ts";
 import { registerRetryAfterRefusal } from "./retry-refusal.ts";
+import { normalizeTransportError } from "./transport-errors.ts";
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 import { createAnthropicStreamOverlay } from "./anthropic-provider.ts";
 import { type DeviceIdentity, loadClaudeCodeIdentity } from "./device-id.ts";
@@ -123,6 +124,7 @@ export function createClaudeAuthExtension(
 			createAnthropicStreamOverlay(anthropic, deviceIdentity) as unknown as ProviderConfig,
 		);
 
+		pi.on("message_end", normalizeTransportError);
 		registerRetryAfterRefusal(pi);
 
 		// Surface a degraded-version alert on startup (offline resolutions stay

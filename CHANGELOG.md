@@ -9,6 +9,7 @@
 ### Fixed
 
 - Fixed historical Claude thinking blocks being dropped after Edit and retry and after `/reload` on a rewound session. Requests now preserve the retained conversation prefix.
+- Fixed Anthropic turns stopping without retry on recognized `connection reset by peer`, `ECONNRESET`, and `unexpected EOF` errors. Pi now retries these failures without a new user message, subject to its existing retry limits and cancellation. See [Transport failures](README.md#transport-failures).
 
 ## [1.3.1] - 2026-10-21
 
